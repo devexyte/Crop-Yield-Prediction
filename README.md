@@ -1,28 +1,32 @@
-# Crop Yield Prediction System
+# Crop Yield Prediction
 
-A desktop application that predicts seasonal crop yields using historical climate and soil data. The system supports two models: **Random Forest** and **Ridge Regression**, providing predictions alongside performance metrics and visual analytics.
+A machine learning desktop application that predicts crop yields across Indian states and districts using historical climate, soil nutrient data, and past harvest records.
+
+The application allows users to select a region, crop, and season to estimate yields using either **Random Forest** or **Ridge Regression**, compare model performance side-by-side, inspect visual analytics, and export advisory reports to PDF or Word.
 
 ---
 
-## Features
+## Key Features
 
-- **Two Machine Learning Models**:
-  - **Random Forest**: Captures non-linear relationships across environmental variables.
-  - **Ridge Regression (L2)**: Linear regularized model for stable baseline comparisons.
-  - **Side-by-Side Comparison**: Directly compare predictions and accuracy between both models.
+- **Dual Model Support**:
+  - **Random Forest**: Primary non-linear model capturing complex relationships between soil chemistry, weather, and yield trends.
+  - **Ridge Regression (L2)**: Regularized linear model used as an interpretable baseline.
+  - **Model Comparison**: View predictions, error margins ($R^2$, RMSE, MAE), and consensus estimates side-by-side.
 
 - **Desktop Interface**:
-  - Built with Python and Tkinter with high-DPI scaling.
-  - Dropdown selection: State $\rightarrow$ District $\rightarrow$ Crop $\rightarrow$ Season.
-  - Dropdown values cascade so only available combinations are selectable.
-  - Unit conversions: Tonnes/Hectare, Quintals/Acre, and kg/Hectare.
+  - Built using Python and Tkinter with high-DPI display support.
+  - Cascading dropdowns (`State` &rarr; `District` &rarr; `Crop` &rarr; `Season`) that automatically filter available options.
+  - Instant unit conversion between **Tonnes / Hectare**, **Quintals / Acre**, and **Kilograms / Hectare**.
 
-- **Detailed Analytics Window**:
-  - **Yield Over Time**: Historical recorded yield vs. model fitted values with upcoming harvest projection.
-  - **Yield Distribution**: Histogram and normal density curve benchmarking the forecast against historical yields.
-  - **Prediction Residuals**: Bar chart showing historical error margins ($Actual - Predicted$) for past harvest years.
-  - **Yield Categories**: Pie diagram illustrating the distribution of historical harvests across productivity tiers.
-  - **Data Tables & Executive Export**: Interactive tables for historical harvests, weather, soil readings, and one-click export to **Executive PDF** or **Microsoft Word (.docx)** with embedded statistical charts.
+- **Visual Analytics & Diagnostics**:
+  - **Yield Over Time**: Historical harvest trajectory plotted alongside the upcoming model forecast.
+  - **Regional Distribution**: Forecast benchmarked against the crop's historical yield distribution in the region.
+  - **Prediction Residuals**: Error margins ($Actual - Fitted$) across past harvest seasons.
+  - **Productivity Tiers**: Donut chart breaking down historical yields into High, Moderate, and Low production tiers.
+
+- **Report Export**:
+  - Export comprehensive reports directly to **PDF** (via ReportLab) or **Microsoft Word (.docx)**.
+  - Includes input parameters, baseline soil and climate averages, historical records, and embedded high-resolution analytics plots.
 
 ---
 
@@ -30,16 +34,16 @@ A desktop application that predicts seasonal crop yields using historical climat
 
 ```
 Crop-Yield-Prediction/
-├── final_gui.py                            # Main desktop application interface
-├── detailed_view.py                        # Analytics dashboard, tables, and Matplotlib plots
-├── report_exporter.py                      # Executive PDF and Microsoft Word document generator
-├── crop_yield_prediction.py                # Core ML inference engine and caching layer
-├── training.py                             # Offline model training pipeline
-├── final_merged_and_cleaned_dataset_3.csv  # Cleaned national agricultural dataset
-├── requirements.txt                        # Python package dependencies
+├── final_gui.py                            # Main application window and user interface
+├── detailed_view.py                        # Analytics dashboard, data tables, and Matplotlib charts
+├── report_exporter.py                      # PDF and Word document exporter
+├── crop_yield_prediction.py                # Core prediction engine and model loader
+├── training.py                             # Script to train and serialize models
+├── final_merged_and_cleaned_dataset_3.csv  # Agricultural, soil, and climate dataset
+├── requirements.txt                        # Python dependencies
 └── models/
-    ├── rf/                                 # Trained Random Forest models & evaluation metrics
-    └── linear/                             # Trained Ridge Regression models & evaluation metrics
+    ├── random_forest/                      # Trained Random Forest models and metrics
+    └── ridge/                              # Trained Ridge Regression models and metrics
 ```
 
 ---
@@ -47,45 +51,75 @@ Crop-Yield-Prediction/
 ## Installation & Setup
 
 ### 1. Prerequisites
-- Python 3.9 or higher (tested up to Python 3.14)
+- Python 3.9 or newer
 - Git
 
-### 2. Install Dependencies
+### 2. Clone the Repository
+```bash
+git clone https://github.com/devexyte/Crop-Yield-Prediction.git
+cd Crop-Yield-Prediction
+```
+
+### 3. Create a Virtual Environment (Recommended)
+```bash
+# Windows
+python -m venv .venv
+.venv\Scripts\activate
+
+# macOS / Linux
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 4. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
 ---
 
-## Running the Application
+## Usage
 
-### Launch GUI
+### Launch the Application
 ```bash
 python final_gui.py
 ```
 
+1. Select **State**, **District**, **Crop**, and **Season** using the dropdowns.
+2. Choose your preferred model (**Random Forest** or **Ridge Regression**).
+3. Click **Predict Yield** (or press `Enter`).
+4. Click **Detailed Analytics** (or press `F1`) to explore charts and export reports.
+5. Click **Compare Models** (or press `Shift + Enter`) to view a side-by-side performance breakdown.
+
 ### Keyboard Shortcuts
-- **Enter**: Run prediction with the selected model
-- **Shift + Enter**: Open dual-model comparison dialog
-- **F1** or **Ctrl + D**: Open detailed analytics report & graphs
-- **Esc**: Reset parameter form
+| Shortcut | Action |
+| :--- | :--- |
+| `Enter` | Run prediction with selected model |
+| `Shift + Enter` | Open model comparison dialog |
+| `F1` or `Ctrl + D` | Open detailed analytics and charts |
+| `Escape` | Reset selection form |
 
 ---
 
-## Retraining Models (Optional)
+## Model Training
 
-To train or update models from the dataset:
+Pre-trained models for all supported crops are included in the `models/` directory. If you want to retrain models on updated data:
 
 ```bash
 # Train both Random Forest and Ridge models for all crops
 python training.py --model both
 
-# Train for a specific crop (e.g. Wheat)
+# Train only Random Forest models
+python training.py --model random_forest
+
+# Train models for a specific crop (e.g. Wheat)
 python training.py --crop "Wheat" --model both
 ```
+
+Trained models and their evaluation metrics (`.pkl`) will be saved into `models/random_forest/` and `models/ridge/`.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+Distributed under the Apache License 2.0. See [LICENSE](LICENSE) for more details.

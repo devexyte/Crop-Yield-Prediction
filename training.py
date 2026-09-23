@@ -29,14 +29,19 @@ def train_single_model(model_type, crop, X_train, X_test, y_train, y_test, out_d
     """Fit, evaluate, and serialize a regression model for a specific crop."""
     os.makedirs(out_dir, exist_ok=True)
 
-    if model_type in ["linear", "ridge"]:
-        model = Ridge(alpha=1.0)
-    elif model_type == "rf":
+    normalized_type = "ridge" if model_type in ["linear", "ridge"] else "random_forest"
+
+    if normalized_type == "ridge":
+        from sklearn.linear_model import RidgeCV
+        model = RidgeCV(alphas=[0.05, 0.1, 0.5, 1.0, 5.0, 10.0])
+    elif normalized_type == "random_forest":
         model = RandomForestRegressor(
-            n_estimators=300,
-            max_depth=20,
-            min_samples_split=5,
-            min_samples_leaf=2,
+            n_estimators=350,
+            max_depth=25,
+            min_samples_split=3,
+            min_samples_leaf=1,
+            max_features=0.7,
+            bootstrap=True,
             random_state=42,
             n_jobs=-1
         )
@@ -67,7 +72,14 @@ def train_single_model(model_type, crop, X_train, X_test, y_train, y_test, out_d
     }
     joblib.dump(metrics, metrics_file)
 
-    type_label = "RIDGE" if model_type in ["linear", "ridge"] else "RF"
+    # Maintain legacy folders (rf / linear) for full backward compatibility
+    legacy_folder_name = "linear" if normalized_type == "ridge" else "rf"
+    legacy_dir = os.path.join(os.path.dirname(out_dir), legacy_folder_name)
+    os.makedirs(legacy_dir, exist_ok=True)
+    joblib.dump(model, os.path.join(legacy_dir, f"{crop_slug}_model.pkl"))
+    joblib.dump(metrics, os.path.join(legacy_dir, f"{crop_slug}_metrics.pkl"))
+
+    type_label = "RIDGE" if normalized_type == "ridge" else "RANDOM_FOREST"
     print(f"  [{type_label}] Saved model: {model_file}")
     print(f"  [{type_label}] Saved metrics: {metrics_file} (R² = {r2:.4f}, MAE = {mae:.4f}, RMSE = {rmse:.4f})")
 
@@ -78,9 +90,9 @@ def main():
     )
     parser.add_argument(
         "--model",
-        choices=["linear", "ridge", "rf", "both", "all"],
+        choices=["linear", "ridge", "rf", "random_forest", "both", "all"],
         default="both",
-        help="Model architecture: 'rf', 'ridge' (linear L2), or 'both' (default: both)"
+        help="Model architecture: 'random_forest'/'rf', 'ridge'/'linear', or 'both' (default: both)"
     )
     parser.add_argument(
         "--crop",
@@ -101,11 +113,12 @@ def main():
 
     args = parser.parse_args()
 
-    selected_models = []
+    # Categorize models into dedicated folders inside 'models/'
+    selected_categories = []
+    if args.model in ["rf", "random_forest", "both", "all"]:
+        selected_categories.append("random_forest")
     if args.model in ["linear", "ridge", "both", "all"]:
-        selected_models.append("linear")
-    if args.model in ["rf", "both", "all"]:
-        selected_models.append("rf")
+        selected_categories.append("ridge")
 
     if not os.path.exists(args.dataset):
         raise FileNotFoundError(f"Dataset not found at: {args.dataset}")
@@ -129,7 +142,8 @@ def main():
     else:
         crop_list = sorted(data["crop_name"].unique())
 
-    print(f"Found {len(crop_list)} crops. Training targets: {', '.join(selected_models)}")
+    print(f"Found {len(crop_list)} crops. Training targets: {', '.join(selected_categories)}")
+    print(f"Target model directories: {', '.join([os.path.join('models', cat) for cat in selected_categories])}")
 
     for crop in crop_list:
         crop_data = data[(data["crop_name"] == crop) & (data["yield"] > 0)].copy()
@@ -138,9 +152,19 @@ def main():
             print(f"Skipping {crop} (insufficient records: {len(crop_data)} < 50)")
             continue
 
+        # Sanitize extreme typo outliers (> 99.5th percentile when severely disconnected from 99th)
+        q99 = crop_data["yield"].quantile(0.99)
+        q995 = crop_data["yield"].quantile(0.995)
+        max_y = crop_data["yield"].max()
+        if max_y > 2.5 * q99 and max_y > 10.0:
+            trimmed_count = int((crop_data["yield"] > q995).sum())
+            print(f"  [Sanitization] Trimming {trimmed_count} extreme outlier typo entries (> {q995:.2f} t/ha, max was {max_y:.2f})")
+            crop_data = crop_data[crop_data["yield"] <= q995].copy()
+
         print(f"\nTraining models for: {crop} ({len(crop_data)} records)")
 
-        drop_cols = ["yield", "yield_unit", "year", "district_code", "crop_code"]
+        # Retain 'year' to capture technological and agronomic progress across decades
+        drop_cols = ["yield", "yield_unit", "district_code", "crop_code"]
         X = crop_data.drop(columns=[c for c in drop_cols if c in crop_data.columns])
         y = crop_data["yield"]
 
@@ -150,9 +174,9 @@ def main():
             X, y, test_size=0.2, random_state=42
         )
 
-        for m in selected_models:
-            out_dir = os.path.join(base_dir, "models", m)
-            train_single_model(m, crop, X_train, X_test, y_train, y_test, out_dir)
+        for category in selected_categories:
+            out_dir = os.path.join(base_dir, "models", category)
+            train_single_model(category, crop, X_train, X_test, y_train, y_test, out_dir)
 
     print("\nModel training pipeline complete.")
 

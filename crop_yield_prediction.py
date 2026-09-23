@@ -73,36 +73,72 @@ def get_dataset():
 
 def get_trained_crops():
     """Return a set of clean crop slugs that have both RF and Ridge models available."""
-    rf_dir = os.path.join(BASE_DIR, "models", "rf")
-    linear_dir = os.path.join(BASE_DIR, "models", "linear")
+    rf_dirs = [
+        os.path.join(BASE_DIR, "models", "random_forest"),
+        os.path.join(BASE_DIR, "models", "random forest"),
+        os.path.join(BASE_DIR, "models", "rf"),
+    ]
+    ridge_dirs = [
+        os.path.join(BASE_DIR, "models", "ridge"),
+        os.path.join(BASE_DIR, "models", "linear"),
+    ]
 
-    rf_models = {f.replace("_model.pkl", "") for f in os.listdir(rf_dir) if f.endswith("_model.pkl")} if os.path.exists(rf_dir) else set()
-    lin_models = {f.replace("_model.pkl", "") for f in os.listdir(linear_dir) if f.endswith("_model.pkl")} if os.path.exists(linear_dir) else set()
+    rf_models = set()
+    for d in rf_dirs:
+        if os.path.exists(d):
+            rf_models.update(f.replace("_model.pkl", "") for f in os.listdir(d) if f.endswith("_model.pkl"))
 
-    return rf_models & lin_models
+    ridge_models = set()
+    for d in ridge_dirs:
+        if os.path.exists(d):
+            ridge_models.update(f.replace("_model.pkl", "") for f in os.listdir(d) if f.endswith("_model.pkl"))
+
+    return rf_models & ridge_models
 
 
 def load_model_and_metrics(crop, model_type="rf"):
     """
     Retrieve trained model and metrics from memory cache or disk.
-    Supported model_type values: 'rf' (Random Forest) or 'linear' / 'ridge' (Ridge Regression).
+    Supported model_type values: 'rf' / 'random_forest' or 'linear' / 'ridge'.
     """
-    subfolder = "linear" if "lin" in str(model_type).lower() or "ridge" in str(model_type).lower() else "rf"
+    m_str = str(model_type).lower().strip()
+    if "lin" in m_str or "ridge" in m_str:
+        subfolder = "ridge"
+        candidate_dirs = [
+            os.path.join(BASE_DIR, "models", "ridge"),
+            os.path.join(BASE_DIR, "models", "linear"),
+        ]
+        model_display = "Ridge Regression"
+    else:
+        subfolder = "random_forest"
+        candidate_dirs = [
+            os.path.join(BASE_DIR, "models", "random_forest"),
+            os.path.join(BASE_DIR, "models", "random forest"),
+            os.path.join(BASE_DIR, "models", "rf"),
+        ]
+        model_display = "Random Forest"
+
     crop_file = clean_name(crop)
     cache_key = f"{subfolder}:{crop_file}"
 
     if cache_key in _MODEL_CACHE:
         return _MODEL_CACHE[cache_key]
 
-    model_path = os.path.join(BASE_DIR, "models", subfolder, f"{crop_file}_model.pkl")
-    metrics_path = os.path.join(BASE_DIR, "models", subfolder, f"{crop_file}_metrics.pkl")
+    model_path = None
+    metrics_path = None
+    for d in candidate_dirs:
+        m_p = os.path.join(d, f"{crop_file}_model.pkl")
+        met_p = os.path.join(d, f"{crop_file}_metrics.pkl")
+        if os.path.exists(m_p) and os.path.exists(met_p):
+            model_path = m_p
+            metrics_path = met_p
+            break
 
-    if not os.path.exists(model_path):
+    if not model_path or not os.path.exists(model_path):
         model_path = os.path.join(BASE_DIR, "models", f"{crop_file}_model.pkl")
-    if not os.path.exists(metrics_path):
+    if not metrics_path or not os.path.exists(metrics_path):
         metrics_path = os.path.join(BASE_DIR, "models", f"{crop_file}_metrics.pkl")
 
-    model_display = "Ridge Regression" if subfolder == "linear" else "Random Forest"
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"{model_display} model not found for crop: {crop}")
     if not os.path.exists(metrics_path):
@@ -130,6 +166,13 @@ def detailed_prediction(state, district, crop, season, model_type="rf"):
 
     if crop_data.empty:
         raise ValueError(f"No records found for crop '{crop}' with positive yield.")
+
+    # Sanitize extreme typo outliers so charts and baseline summary stats are realistic
+    q99 = crop_data["yield"].quantile(0.99)
+    q995 = crop_data["yield"].quantile(0.995)
+    max_y = crop_data["yield"].max()
+    if max_y > 2.5 * q99 and max_y > 10.0:
+        crop_data = crop_data[crop_data["yield"] <= q995].copy()
 
     # Load model & metrics (supports RF and Ridge)
     model, metrics, resolved_type = load_model_and_metrics(crop, model_type)
@@ -159,7 +202,7 @@ def detailed_prediction(state, district, crop, season, model_type="rf"):
     historical_predictions = []
     historical_residuals = []
 
-    drop_cols = ["yield", "yield_unit", "year", "district_code", "crop_code"]
+    drop_cols = ["yield", "yield_unit", "district_code", "crop_code"]
     for _, hist_row in filtered.iterrows():
         sample_df = pd.DataFrame([hist_row.to_dict()]).drop(columns=[c for c in drop_cols if c in hist_row])
         sample_encoded = pd.get_dummies(sample_df)
@@ -183,6 +226,7 @@ def detailed_prediction(state, district, crop, season, model_type="rf"):
 
     # Build representative feature profile (5-year median conditions)
     prediction_row = {}
+    prediction_row["year"] = int(latest["year"]) + 1
     for feat in numeric_features:
         if feat in filtered.columns:
             prediction_row[feat] = float(filtered[feat].median())
@@ -271,7 +315,7 @@ def detailed_prediction(state, district, crop, season, model_type="rf"):
 
     feature_table = pd.DataFrame(feature_rows)
 
-    model_display_name = "Ridge Regression" if resolved_type == "linear" else "Random Forest Regressor"
+    model_display_name = "Ridge Regression" if resolved_type in ["linear", "ridge"] else "Random Forest Regressor"
 
     summary = {
         "total_records": int(len(data)),

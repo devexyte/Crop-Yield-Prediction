@@ -1,459 +1,862 @@
+import os
 import tkinter as tk
-from tkinter import ttk
-import matplotlib.pyplot as plt
+from tkinter import ttk, messagebox, filedialog
+import numpy as np
+import pandas as pd
+from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import seaborn as sns
+from matplotlib.ticker import MaxNLocator
+from matplotlib.patches import Circle
 from crop_yield_prediction import detailed_prediction
+import report_exporter
+
+PRIMARY_COLOR = "#1B4D2E"
+SECONDARY_COLOR = "#2E7D32"
+BG_COLOR = "#F4F7F4"
+CARD_BG = "#FFFFFF"
+CARD_BORDER = "#D8E2D8"
+TEXT_COLOR = "#1C251D"
+MUTED_TEXT = "#5C6B5E"
+ACCENT_BLUE = "#1565C0"
+ACCENT_AMBER = "#E65100"
 
 
-# ======================================================
-# TREEVIEW FUNCTION
-# ======================================================
-
-def create_tree(parent, dataframe):
-
-    tree_frame = tk.Frame(parent)
-    tree_frame.pack(fill="both", expand=True)
-
+def setup_treeview_style():
+    """Configure modern styling for ttk.Treeview widgets."""
     style = ttk.Style()
     style.theme_use("clam")
 
-    style.configure("Treeview.Heading",
-                    background="#2E7D32",
-                    foreground="white",
-                    font=("Segoe UI", 11, "bold"),
-                    padding=8)
+    style.configure(
+        "Modern.Treeview.Heading",
+        background="#205833",
+        foreground="white",
+        font=("Segoe UI", 10, "bold"),
+        padding=(8, 6),
+        relief="flat"
+    )
+    style.map(
+        "Modern.Treeview.Heading",
+        background=[("active", "#1B4D2E")]
+    )
 
-    style.configure("Treeview",
-                    background="white",
-                    foreground="#333333",
-                    rowheight=35,
-                    font=("Segoe UI",10),
-                    fieldbackground="white")
+    style.configure(
+        "Modern.Treeview",
+        background="white",
+        foreground=TEXT_COLOR,
+        rowheight=30,
+        font=("Segoe UI", 9),
+        fieldbackground="white",
+        borderwidth=0
+    )
+    style.map(
+        "Modern.Treeview",
+        background=[("selected", "#C8E6C9")],
+        foreground=[("selected", "#1B4D2E")]
+    )
 
-    style.map("Treeview",
-              background=[("selected","#A5D6A7")],
-              foreground=[("selected","black")])
 
-    tree = ttk.Treeview(tree_frame)
+def create_styled_tree(parent, dataframe):
+    """Render a DataFrame as a clean, scrollable Treeview with zebra rows."""
+    setup_treeview_style()
+
+    container = tk.Frame(parent, bg=CARD_BG, bd=1, relief="solid", highlightbackground=CARD_BORDER)
+    container.pack(fill="both", expand=True, padx=2, pady=2)
+
+    tree = ttk.Treeview(container, style="Modern.Treeview", show="headings")
     tree["columns"] = list(dataframe.columns)
-    tree["show"] = "headings"
 
     for col in dataframe.columns:
-        tree.heading(col, text=col)
-        tree.column(col, width=180, anchor="center")   # ⭐ wider columns
+        tree.heading(col, text=str(col))
+        sample_len = max(len(str(col)), max([len(str(val)) for val in dataframe[col].head(15)], default=8))
+        col_width = max(110, min(sample_len * 12 + 25, 260))
+        tree.column(col, width=col_width, anchor="center")
 
-    for index, row in dataframe.iterrows():
-        # ⭐ round long floats for cleaner UI
-        values = [round(v, 3) if isinstance(v, float) else v for v in row]
+    for i, (_, row) in enumerate(dataframe.iterrows()):
+        formatted_vals = []
+        for val in row:
+            if isinstance(val, float):
+                formatted_vals.append(f"{val:.3f}" if abs(val) < 100 else f"{val:.1f}")
+            else:
+                formatted_vals.append(str(val))
 
-        tag = "evenrow" if index % 2 == 0 else "oddrow"
-        tree.insert("", "end", values=values, tags=(tag,))
+        tag = "evenrow" if i % 2 == 0 else "oddrow"
+        tree.insert("", "end", values=formatted_vals, tags=(tag,))
 
-    tree.tag_configure("evenrow", background="#F1F8E9")
-    tree.tag_configure("oddrow", background="white")
+    tree.tag_configure("evenrow", background="#F8FAF8")
+    tree.tag_configure("oddrow", background="#FFFFFF")
 
-    scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-    scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
-
+    scroll_y = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
+    scroll_x = ttk.Scrollbar(container, orient="horizontal", command=tree.xview)
     tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
 
     tree.grid(row=0, column=0, sticky="nsew")
     scroll_y.grid(row=0, column=1, sticky="ns")
     scroll_x.grid(row=1, column=0, sticky="ew")
 
-    tree_frame.grid_rowconfigure(0, weight=1)
-    tree_frame.grid_columnconfigure(0, weight=1)
-    def _on_shift_mousewheel(event):
-        tree.xview_scroll(int(-1 * (event.delta / 120)), "units")
+    container.grid_rowconfigure(0, weight=1)
+    container.grid_columnconfigure(0, weight=1)
 
-    tree.bind("<Shift-MouseWheel>", _on_shift_mousewheel)
-    return tree
+    def _on_shift_wheel(e):
+        tree.xview_scroll(int(-1 * (e.delta / 120)), "units")
 
+    tree.bind("<Shift-MouseWheel>", _on_shift_wheel)
 
-
-# ======================================================
-# CARD FUNCTION
-# ======================================================
-
-def create_card(parent):
-    card = tk.Frame(parent, bg="white", bd=2, relief="groove")
-    card.pack(fill="x", padx=30, pady=10)
-    return card
+    # Register as scroll target for active tab
+    parent._scroll_target = tree
+    return tree, container
 
 
-# ======================================================
-# SCROLLABLE CONTENT
-# ======================================================
-
-def create_scrollable_content(parent):
-
-    canvas = tk.Canvas(parent, bg="#F4F8F4", highlightthickness=0)
+def create_scrollable_container(parent):
+    """
+    Build a scrollable frame with a Canvas and Scrollbar configured for web-like smooth scrolling.
+    """
+    canvas = tk.Canvas(parent, bg=BG_COLOR, highlightthickness=0, yscrollincrement=5)
     scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+    scroll_frame = tk.Frame(canvas, bg=BG_COLOR)
 
-    scroll_frame = tk.Frame(canvas, bg="#F4F8F4")
+    def _update_scrollregion(e=None):
+        canvas.update_idletasks()
+        bbox = canvas.bbox("all")
+        if bbox:
+            canvas.configure(scrollregion=(bbox[0], bbox[1], bbox[2], bbox[3] + 40))
 
-    scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    scroll_frame.bind("<Configure>", _update_scrollregion)
+    window_id = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
 
-    window_id = canvas.create_window((0,0), window=scroll_frame, anchor="nw")
+    def _on_canvas_configure(e):
+        canvas.itemconfig(window_id, width=e.width)
 
-    canvas.bind("<Configure>", lambda e: canvas.itemconfig(window_id, width=e.width))
+    canvas.bind("<Configure>", _on_canvas_configure)
     canvas.configure(yscrollcommand=scrollbar.set)
 
     canvas.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
 
-    def _on_mousewheel(event):
-        canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-
-    canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
-    canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
-
+    # Set scroll target on parent tab
+    parent._scroll_target = canvas
+    scroll_frame._parent_canvas = canvas
     return scroll_frame
 
 
-# ======================================================
-# SHOW WINDOW
-# ======================================================
+def create_card_frame(parent, title=None, padx=25, pady=10):
+    """Reusable styled card with optional header bar and border."""
+    wrapper = tk.Frame(parent, bg=BG_COLOR)
+    wrapper.pack(fill="x", padx=padx, pady=pady)
 
-def show_window(state, district, crop, season, model_type="rf"):
+    card = tk.Frame(wrapper, bg=CARD_BG, bd=1, relief="solid", highlightbackground=CARD_BORDER)
+    card.pack(fill="both", expand=True)
 
-    result = detailed_prediction(state, district, crop, season, model_type=model_type)
-
-    model_display_name = result["prediction"].get("model_type", "Machine Learning")
-
-    window = tk.Toplevel()
-    window.title(f"Detailed Crop Yield Report ({model_display_name})")
-    window.geometry("1300x720")
-    window.configure(bg="#F4F8F4")
-    window.resizable(True, True)
-
-    header = tk.Frame(window, bg="#1B5E20", height=80)
-    header.pack(fill="x")
-
-    tk.Label(
-        header,
-        text=f"🌾 DETAILED CROP YIELD REPORT ({model_display_name.upper()})",
-        bg="#1B5E20",
-        fg="white",
-        font=("Segoe UI",22,"bold")
-    ).pack(pady=18)
-
-    style = ttk.Style()
-    style.theme_use("clam")
-    style.configure("TNotebook", background="#F4F8F4")
-    style.configure("TNotebook.Tab", font=("Segoe UI",11,"bold"), padding=(20,10))
-
-    notebook = ttk.Notebook(window)
-    notebook.pack(fill="both", expand=True, padx=20, pady=20)
-
-    prediction_tab = tk.Frame(notebook)
-    history_tab = tk.Frame(notebook)
-    weather_tab = tk.Frame(notebook)
-    features_tab = tk.Frame(notebook)
-    summary_tab = tk.Frame(notebook)
-
-    notebook.add(prediction_tab, text="Prediction")
-    notebook.add(history_tab, text="History")
-    notebook.add(weather_tab, text="Weather & Soil")
-    notebook.add(features_tab, text="Features")
-    notebook.add(summary_tab, text="Summary")
-
-    def next_tab():
-        current = notebook.index(notebook.select())
-        total = notebook.index("end")
-        if current < total - 1:
-            notebook.select(current + 1)
-
-    def previous_tab():
-        current = notebook.index(notebook.select())
-        if current > 0:
-            notebook.select(current - 1)
-
-    def hover(button, normal, hover_color):
-        button.bind("<Enter>", lambda e: button.config(bg=hover_color))
-        button.bind("<Leave>", lambda e: button.config(bg=normal))
-
-    def create_tab_layout(tab, title):
-        container = tk.Frame(tab, bg="#F4F8F4")
-        container.pack(fill="both", expand=True)
+    if title:
+        header_bar = tk.Frame(card, bg="#F1F6F1", height=36)
+        header_bar.pack(fill="x")
+        header_bar.pack_propagate(False)
 
         tk.Label(
-            container,
+            header_bar,
             text=title,
-            bg="#F4F8F4",
-            fg="#1B5E20",
-            font=("Segoe UI",20,"bold")
-        ).pack(pady=(15,10))
+            bg="#F1F6F1",
+            fg=PRIMARY_COLOR,
+            font=("Segoe UI", 11, "bold")
+        ).pack(side="left", padx=16, pady=6)
 
-        content_container = tk.Frame(container, bg="#F4F8F4")
-        content_container.pack(fill="both", expand=True)
+    content_frame = tk.Frame(card, bg=CARD_BG, padx=16, pady=14)
+    content_frame.pack(fill="both", expand=True)
+    return content_frame
 
-        content = create_scrollable_content(content_container)
 
-        nav = tk.Frame(container, bg="#F4F8F4")
-        nav.pack(fill="x", pady=10)
+def setup_window_scrolling(window, notebook):
+    """
+    Attach universal mouse wheel and keyboard scrolling to the detailed view window.
+    Applies fluid, website-style scroll distance per wheel notch.
+    """
+    def _on_mousewheel(event):
+        try:
+            active_tab_id = notebook.select()
+            if not active_tab_id:
+                return
+            active_tab = notebook.nametowidget(active_tab_id)
+            target = getattr(active_tab, "_scroll_target", None)
+            if target and hasattr(target, "yview_scroll"):
+                # Natural web-like scroll travel (4-5 units per notch)
+                step = int(-1 * (event.delta / 120) * 5)
+                target.yview_scroll(step, "units")
+                return "break"
+        except Exception:
+            pass
 
-        return content, nav
+    def _on_key_scroll(event):
+        try:
+            active_tab_id = notebook.select()
+            if not active_tab_id:
+                return
+            active_tab = notebook.nametowidget(active_tab_id)
+            target = getattr(active_tab, "_scroll_target", None)
+            if not target or not hasattr(target, "yview_scroll"):
+                return
 
-    def add_navigation(nav):
-        center = tk.Frame(nav, bg="#F4F8F4")
-        center.pack()
+            if event.keysym in ["Page_Down", "space"]:
+                target.yview_scroll(8, "pages")
+                return "break"
+            elif event.keysym == "Page_Up":
+                target.yview_scroll(-8, "pages")
+                return "break"
+            elif event.keysym == "Down":
+                target.yview_scroll(3, "units")
+                return "break"
+            elif event.keysym == "Up":
+                target.yview_scroll(-3, "units")
+                return "break"
+        except Exception:
+            pass
 
-        def on_close():
-            plt.close("all")
-            window.destroy()
+    window.bind_all("<MouseWheel>", _on_mousewheel)
+    window.bind("<Page_Down>", _on_key_scroll)
+    window.bind("<Page_Up>", _on_key_scroll)
+    window.bind("<Down>", _on_key_scroll)
+    window.bind("<Up>", _on_key_scroll)
+    window.bind("<space>", _on_key_scroll)
 
-        window.protocol("WM_DELETE_WINDOW", on_close)
 
-        prev = tk.Button(center, text="◀ Previous", bg="#FB8C00", fg="white",
-                         font=("Segoe UI",10,"bold"), width=14, relief="flat",
-                         command=previous_tab)
-
-        home = tk.Button(center, text="🏠 Home", bg="#C62828", fg="white",
-                         font=("Segoe UI",10,"bold"), width=14, relief="flat",
-                         command=on_close)
-
-        nxt = tk.Button(center, text="Next ▶", bg="#2E7D32", fg="white",
-                        font=("Segoe UI",10,"bold"), width=14, relief="flat",
-                        command=next_tab)
-
-        prev.grid(row=0, column=0, padx=15, pady=10)
-        home.grid(row=0, column=1, padx=15, pady=10)
-        nxt.grid(row=0, column=2, padx=15, pady=10)
-
-        hover(prev, "#FB8C00", "#EF6C00")
-        hover(home, "#C62828", "#B71C1C")
-        hover(nxt, "#2E7D32", "#1B5E20")
+def show_window(state, district, crop, season, model_type="rf"):
+    """Open the comprehensive analytics and reporting window."""
+    result = detailed_prediction(state, district, crop, season, model_type=model_type)
 
     prediction = result["prediction"]
     performance = result["performance"]
-
-    # ======================================================
-    # PREDICTION TAB
-    # ======================================================
-
-    prediction_content, prediction_nav = create_tab_layout(prediction_tab, "🌾 Prediction Overview")
-
-    info_card = create_card(prediction_content)
-
-    fields = [
-        ("📍 State", prediction["state"]),
-        ("🏙 District", prediction["district"]),
-        ("🌾 Crop", prediction["crop"]),
-        ("☀ Season", prediction["season"]),
-        ("🤖 Model Used", prediction.get("model_type", "Machine Learning"))
-    ]
-
-    for i, (label, value) in enumerate(fields):
-        tk.Label(info_card, text=label, bg="white", fg="#1B5E20",
-                 font=("Segoe UI",12,"bold")).grid(row=i, column=0, padx=20, pady=10, sticky="w")
-        tk.Label(info_card, text=value, bg="white",
-                 font=("Segoe UI",12)).grid(row=i, column=1, padx=20, sticky="w")
-
-    yield_card = create_card(prediction_content)
-
-    tk.Label(yield_card, text="🌾 Predicted Yield", bg="#E8F5E9",
-             fg="#1B5E20", font=("Segoe UI",13,"bold")).pack(pady=(10,5))
-
-    tk.Label(yield_card, text=f"{prediction['predicted_yield']:.3f} Tonnes/Hectare",
-             bg="#E8F5E9", fg="#2E7D32", font=("Segoe UI",24,"bold")).pack(pady=(0,15))
-
-    metric_card = create_card(prediction_content)
-
-    metrics = [
-        ("📈 Actual Yield", prediction["actual_yield"]),
-        ("🎯 Validation Prediction", prediction["validation_prediction"]),
-        ("❗ Prediction Error", prediction["prediction_error"]),
-        ("📉 MAE", performance["mae"]),
-        ("📊 RMSE", performance["rmse"]),
-        ("✅ R² Score", performance["r2"])
-    ]
-
-    for i, (label, value) in enumerate(metrics):
-        tk.Label(metric_card, text=label, bg="white",
-                 font=("Segoe UI",11,"bold")).grid(row=i, column=0, padx=20, pady=8, sticky="w")
-        tk.Label(metric_card, text=f"{value:.3f}", bg="white", fg="#1565C0",
-                 font=("Segoe UI",11)).grid(row=i, column=1, padx=20, sticky="w")
-
-    add_navigation(prediction_nav)
-
-    # ======================================================
-    # HISTORY TAB
-    # ======================================================
-
-    history_content, history_nav = create_tab_layout(history_tab, "📈 Historical Crop Yield Records")
-
-    history_frame = tk.Frame(history_content)
-    history_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-    create_tree(history_frame, result["history"])
-    add_navigation(history_nav)
-
-    # ======================================================
-    # WEATHER TAB
-    # ======================================================
-
-    weather_content, weather_nav = create_tab_layout(weather_tab, "☁ Weather & Soil Data")
-
-    weather_frame = tk.Frame(weather_content,height=420)
-    weather_frame.pack(fill="x", expand=True, padx=10, pady=10)
-    weather_frame.pack_propagate(False)
-
-    weather_tree=create_tree(weather_frame, result["weather"])
-
-    for col in weather_tree["columns"]:
-        weather_tree.column(col, stretch=False)
-
-    weather_tree.column("Year", width=90)
-
-    weather_tree.column("Rainfall", width=170)  
-
-    weather_tree.column("Temperature", width=180)
-    
-    weather_tree.column("Nitrogen", width=170)
-
-    weather_tree.column("Phosphorus", width=170)
-
-    weather_tree.column("Potassium", width=170)
-
-    weather_tree.column("Soil pH", width=150)
-
-    weather_tree.column("Organic Carbon", width=220)
-
-    weather_tree.column("Zinc", width=170)
-
-    weather_tree.column("Iron", width=150)
-    weather_tree.column("Copper", width=150)
-    weather_tree.column("Boron", width=150)
-    weather_tree.column("Manganese", width=150)
-    weather_tree.column("Sulphur", width=150)
-    weather_tree.column("Yield", width=150)
-    
-    
-    add_navigation(weather_nav)
-
-    # ======================================================
-    # FEATURES TAB
-    # ======================================================
-
-    features_content, features_nav = create_tab_layout(features_tab, "🧠 Features Used For Prediction")
-
-    feature_frame = tk.Frame(features_content)
-    feature_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-    create_tree(feature_frame, result["features"])
-    add_navigation(features_nav)
-
-    # ======================================================
-    # SUMMARY TAB
-    # ======================================================
-
     summary = result["summary"]
+    history = result["history"]
+    weather = result["weather"]
+    features = result["features"]
+    crop_yield_series = result.get("crop_yield_series", np.array([]))
 
-    summary_content, summary_nav = create_tab_layout(summary_tab, "📋 Dataset Summary")
+    window = tk.Toplevel()
+    model_name = prediction.get("model_type", "Random Forest")
+    crop_upper = str(crop).strip().upper()
+    district_upper = str(district).strip().upper()
+    state_upper = str(state).strip().upper()
 
-    summary_frame = tk.Frame(summary_content)
-    summary_frame.pack(fill="both", expand=True, padx=20, pady=20)
+    window.title(f"Crop Yield Report - {crop.title()} ({district.title()}) | {model_name}")
+    
+    # Adaptive geometry centered on screen
+    window.update_idletasks()
+    sw = window.winfo_screenwidth()
+    sh = window.winfo_screenheight()
+    win_w = min(1260, sw - 40)
+    win_h = min(820, sh - 80)
+    win_x = max(10, (sw - win_w) // 2)
+    win_y = max(10, (sh - win_h) // 2)
+    window.geometry(f"{win_w}x{win_h}+{win_x}+{win_y}")
+    window.minsize(980, 620)
+    window.configure(bg=BG_COLOR)
 
-    dataset_card = create_card(summary_content)
+    # Clean memory release on exit
+    active_figures = []
 
-    dataset_info = [
-        ("📁 Total Dataset Records", summary["total_records"]),
-        ("🌾 Crop Records Used", summary["crop_records"]),
-        ("📜 Historical Records", summary["historical_records"]),
-        ("🧠 Training Samples", summary["training_samples"]),
-        ("🧪 Testing Samples", summary["testing_samples"])
+    def close_report():
+        try:
+            window.unbind_all("<MouseWheel>")
+        except Exception:
+            pass
+        for fig in active_figures:
+            fig.clf()
+        active_figures.clear()
+        window.destroy()
+
+    window.protocol("WM_DELETE_WINDOW", close_report)
+    window.bind("<Escape>", lambda e: close_report())
+
+    # Header Bar (sizes naturally with padding so text is never clipped)
+    header = tk.Frame(window, bg=PRIMARY_COLOR)
+    header.pack(fill="x")
+
+    title_box = tk.Frame(header, bg=PRIMARY_COLOR)
+    title_box.pack(side="left", padx=24, pady=12)
+
+    tk.Label(
+        title_box,
+        text=f"Crop Yield Report: {crop.title()}",
+        bg=PRIMARY_COLOR,
+        fg="#FFFFFF",
+        font=("Segoe UI", 16, "bold")
+    ).pack(anchor="w")
+
+    tk.Label(
+        title_box,
+        text=f"{district.title()}, {state.title()}   •   {season.title()} Season   •   {model_name}",
+        bg=PRIMARY_COLOR,
+        fg="#D7ECD9",
+        font=("Segoe UI", 10)
+    ).pack(anchor="w", pady=(3, 0))
+
+    # Header Action Buttons
+    action_box = tk.Frame(header, bg=PRIMARY_COLOR)
+    action_box.pack(side="right", padx=20, pady=12)
+
+    def export_report(default_fmt="pdf"):
+        if default_fmt == "docx":
+            filetypes = [("Word Document (*.docx)", "*.docx"), ("PDF Document (*.pdf)", "*.pdf")]
+            defext = ".docx"
+            init_file = f"crop_yield_report_{crop.lower()}_{district.lower()}.docx"
+        else:
+            filetypes = [("PDF Document (*.pdf)", "*.pdf"), ("Word Document (*.docx)", "*.docx")]
+            defext = ".pdf"
+            init_file = f"crop_yield_report_{crop.lower()}_{district.lower()}.pdf"
+
+        filepath = filedialog.asksaveasfilename(
+            parent=window,
+            defaultextension=defext,
+            filetypes=filetypes,
+            initialfile=init_file
+        )
+        if not filepath:
+            return
+
+        try:
+            ext = os.path.splitext(filepath)[1].lower()
+            if ext == ".docx":
+                report_exporter.export_docx_report(
+                    filepath, crop, district, state, season, model_name,
+                    prediction, performance, summary, history, weather, features, crop_yield_series
+                )
+                fmt_name = "Word Document (.docx)"
+            elif ext == ".txt":
+                report_exporter.export_txt_report(
+                    filepath, crop, district, state, season, model_name,
+                    prediction, performance, summary, history, weather, features
+                )
+                fmt_name = "Text Summary (.txt)"
+            else:
+                report_exporter.export_pdf_report(
+                    filepath, crop, district, state, season, model_name,
+                    prediction, performance, summary, history, weather, features, crop_yield_series
+                )
+                fmt_name = "PDF Document (.pdf)"
+
+            ans = messagebox.askyesno(
+                "Export Successful",
+                f"Advisory report saved as {fmt_name} to:\n\n{filepath}\n\nWould you like to open it now?",
+                parent=window
+            )
+            if ans:
+                try:
+                    os.startfile(filepath)
+                except Exception:
+                    pass
+        except Exception as err:
+            messagebox.showerror("Export Failed", f"Could not export report:\n{str(err)}", parent=window)
+
+    # 1. Export PDF Button
+    export_pdf_btn = tk.Button(
+        action_box,
+        text="📄 Export PDF",
+        bg="#2E7D32",
+        fg="white",
+        activebackground="#1B5E20",
+        activeforeground="white",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=13,
+        pady=6,
+        cursor="hand2",
+        command=lambda: export_report("pdf")
+    )
+    export_pdf_btn.pack(side="left", padx=4)
+
+    # 2. Export Word Button
+    export_docx_btn = tk.Button(
+        action_box,
+        text="📝 Export Word (.docx)",
+        bg="#1565C0",
+        fg="white",
+        activebackground="#0D47A1",
+        activeforeground="white",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=13,
+        pady=6,
+        cursor="hand2",
+        command=lambda: export_report("docx")
+    )
+    export_docx_btn.pack(side="left", padx=4)
+
+    # 3. Close Button
+    close_btn = tk.Button(
+        action_box,
+        text="✕ Close",
+        bg="#B71C1C",
+        fg="white",
+        activebackground="#880E4F",
+        activeforeground="white",
+        font=("Segoe UI", 9, "bold"),
+        bd=0,
+        padx=14,
+        pady=6,
+        cursor="hand2",
+        command=close_report
+    )
+    close_btn.pack(side="left", padx=4)
+
+    # Bottom Status Footer (packed before notebook to guarantee its bottom dock position)
+    footer = tk.Frame(window, bg="#E8EFE8", height=28)
+    footer.pack(fill="x", side="bottom")
+    footer.pack_propagate(False)
+
+    tk.Label(
+        footer,
+        text=f"Crop Yield Report  •  {crop.title()} in {district.title()}, {state.title()}  •  {model_name}",
+        bg="#E8EFE8",
+        fg=MUTED_TEXT,
+        font=("Segoe UI", 9)
+    ).pack(side="left", padx=20, pady=3)
+
+    tk.Label(
+        footer,
+        text="Press Esc to Close",
+        bg="#E8EFE8",
+        fg=MUTED_TEXT,
+        font=("Segoe UI", 9)
+    ).pack(side="right", padx=20, pady=3)
+
+    # Main Notebook (Tabs)
+    style = ttk.Style()
+    style.configure(
+        "Report.TNotebook",
+        background=BG_COLOR,
+        borderwidth=0
+    )
+    style.configure(
+        "Report.TNotebook.Tab",
+        font=("Segoe UI", 10, "bold"),
+        padding=(18, 9),
+        background="#DFE8DF",
+        foreground=TEXT_COLOR
+    )
+    style.map(
+        "Report.TNotebook.Tab",
+        background=[("selected", "#FFFFFF"), ("active", "#E8F0E8")],
+        foreground=[("selected", PRIMARY_COLOR)]
+    )
+
+    notebook = ttk.Notebook(window, style="Report.TNotebook")
+    notebook.pack(fill="both", expand=True, padx=20, pady=(12, 10))
+
+    tab_pred = tk.Frame(notebook, bg=BG_COLOR)
+    tab_graphs = tk.Frame(notebook, bg=BG_COLOR)
+    tab_history = tk.Frame(notebook, bg=BG_COLOR)
+    tab_weather = tk.Frame(notebook, bg=BG_COLOR)
+    tab_features = tk.Frame(notebook, bg=BG_COLOR)
+    tab_summary = tk.Frame(notebook, bg=BG_COLOR)
+
+    notebook.add(tab_pred, text="  🌾 Overview  ")
+    notebook.add(tab_graphs, text="  📊 Charts  ")
+    notebook.add(tab_history, text="  📈 History  ")
+    notebook.add(tab_weather, text="  ☁ Weather & Soil  ")
+    notebook.add(tab_features, text="  📋 Features  ")
+    notebook.add(tab_summary, text="  📁 Dataset Summary  ")
+
+    # ==============================================================
+    # TAB 1: OVERVIEW & METRICS
+    # ==============================================================
+    pred_scroll = create_scrollable_container(tab_pred)
+
+    hero_card = create_card_frame(pred_scroll, title="🌾 Predicted Yield", padx=30, pady=12)
+
+    pred_val = prediction["predicted_yield"]
+    quintals_ha = pred_val * 10.0
+    quintals_acre = pred_val * 4.047
+    kg_val = pred_val * 1000.0
+
+    if pred_val >= 3.0:
+        badge_text = "High Yield"
+        badge_bg = "#E8F5E9"
+        badge_fg = "#2E7D32"
+    elif pred_val >= 1.8:
+        badge_text = "Moderate Yield"
+        badge_bg = "#FFF8E1"
+        badge_fg = "#F57F17"
+    else:
+        badge_text = "Low Yield"
+        badge_bg = "#FFEBEE"
+        badge_fg = "#C62828"
+
+    yield_box = tk.Frame(hero_card, bg=CARD_BG)
+    yield_box.pack(fill="x", pady=6)
+
+    tk.Label(
+        yield_box,
+        text=f"{pred_val:.3f}",
+        bg=CARD_BG,
+        fg=SECONDARY_COLOR,
+        font=("Segoe UI", 44, "bold")
+    ).pack(side="left")
+
+    unit_box = tk.Frame(yield_box, bg=CARD_BG)
+    unit_box.pack(side="left", padx=14, pady=8)
+
+    tk.Label(
+        unit_box,
+        text="Tonnes / Hectare",
+        bg=CARD_BG,
+        fg=TEXT_COLOR,
+        font=("Segoe UI", 14, "bold")
+    ).pack(anchor="w")
+
+    tk.Label(
+        unit_box,
+        text=f"≈ {quintals_ha:.1f} Quintals/Ha   •   {quintals_acre:.1f} Quintals/Acre   •   {kg_val:.0f} kg/Ha",
+        bg=CARD_BG,
+        fg=MUTED_TEXT,
+        font=("Segoe UI", 10)
+    ).pack(anchor="w")
+
+    tk.Label(
+        yield_box,
+        text=badge_text,
+        bg=badge_bg,
+        fg=badge_fg,
+        font=("Segoe UI", 10, "bold"),
+        padx=14,
+        pady=7
+    ).pack(side="right")
+
+    # Grid Info Card
+    meta_card = create_card_frame(pred_scroll, title="📍 Prediction Details & Validation", padx=30, pady=10)
+
+    val_grid = tk.Frame(meta_card, bg=CARD_BG)
+    val_grid.pack(fill="x")
+
+    left_items = [
+        ("Crop Name", crop.title()),
+        ("Location", f"{district.title()}, {state.title()}"),
+        ("Season", f"{season.title()} Season"),
+        ("Model Used", model_name)
     ]
 
-    for i, (label, value) in enumerate(dataset_info):
-        tk.Label(dataset_card, text=label, bg="white", fg="#1B5E20",
-                 font=("Segoe UI",11,"bold")).grid(row=i, column=0, padx=20, pady=8, sticky="w")
-        tk.Label(dataset_card, text=value, bg="white", fg="#1565C0",
-                 font=("Segoe UI",11)).grid(row=i, column=1, padx=20, sticky="w")
-
-    yield_card = create_card(summary_content)
-
-    tk.Label(yield_card, text="📈 Dataset Yield Statistics", bg="#E8F5E9",
-             fg="#1B5E20", font=("Segoe UI",13,"bold")).pack(pady=(10,5))
-
-    stats = [
-        ("Minimum Yield", summary["yield_min"]),
-        ("Maximum Yield", summary["yield_max"]),
-        ("Average Yield", summary["yield_mean"])
+    right_items = [
+        (f"Latest Recorded Yield ({prediction['latest_year']})", f"{prediction['actual_yield']:.3f} t/ha"),
+        (f"Validation Prediction ({prediction['latest_year']})", f"{prediction['validation_prediction']:.3f} t/ha"),
+        ("Prediction Error", f"{prediction['prediction_error']:.3f} t/ha"),
+        ("Error Rate", f"{(prediction['prediction_error'] / max(0.001, prediction['actual_yield']) * 100):.1f}%")
     ]
 
-    for text, value in stats:
-        row = tk.Frame(yield_card, bg="#E8F5E9")
-        row.pack(fill="x", padx=25, pady=4)
+    for row_idx, (lbl, val) in enumerate(left_items):
+        tk.Label(val_grid, text=lbl, bg=CARD_BG, fg=MUTED_TEXT, font=("Segoe UI", 10, "bold")).grid(row=row_idx, column=0, sticky="w", padx=10, pady=4)
+        tk.Label(val_grid, text=val, bg=CARD_BG, fg=TEXT_COLOR, font=("Segoe UI", 10)).grid(row=row_idx, column=1, sticky="w", padx=10, pady=4)
 
-        tk.Label(row, text=text, bg="#E8F5E9",
-                 font=("Segoe UI",11,"bold")).pack(side="left")
-        tk.Label(row, text=f"{value:.3f}", bg="#E8F5E9",
-                 fg="#2E7D32", font=("Segoe UI",11)).pack(side="right")
+    for row_idx, (lbl, val) in enumerate(right_items):
+        tk.Label(val_grid, text=lbl, bg=CARD_BG, fg=MUTED_TEXT, font=("Segoe UI", 10, "bold")).grid(row=row_idx, column=2, sticky="w", padx=(30, 10), pady=4)
+        tk.Label(val_grid, text=val, bg=CARD_BG, fg=ACCENT_BLUE if "Yield" in lbl else TEXT_COLOR, font=("Segoe UI", 10, "bold" if "Yield" in lbl else "normal")).grid(row=row_idx, column=3, sticky="w", padx=10, pady=4)
 
-    history_card = create_card(summary_content)
+    # Model Performance Evaluation Metrics
+    metric_card = create_card_frame(pred_scroll, title="📊 Model Performance", padx=30, pady=10)
 
-    history_data = [
-        ("📊 Mean Yield", summary["historical_mean"]),
-        ("📉 Median Yield", summary["historical_median"])
+    metrics_container = tk.Frame(metric_card, bg=CARD_BG)
+    metrics_container.pack(fill="x", pady=6)
+
+    def add_metric_pill(parent, title, value, subtext, color):
+        box = tk.Frame(parent, bg="#F9FAF9", bd=1, relief="solid", highlightbackground=CARD_BORDER, padx=16, pady=12)
+        box.pack(side="left", expand=True, fill="both", padx=6)
+
+        tk.Label(box, text=title, bg="#F9FAF9", fg=MUTED_TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        tk.Label(box, text=value, bg="#F9FAF9", fg=color, font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(2, 0))
+        tk.Label(box, text=subtext, bg="#F9FAF9", fg=MUTED_TEXT, font=("Segoe UI", 8)).pack(anchor="w")
+
+    add_metric_pill(metrics_container, "R² SCORE", f"{performance['r2']:.3f}", "Goodness of fit (0 to 1)", SECONDARY_COLOR)
+    add_metric_pill(metrics_container, "RMSE", f"{performance['rmse']:.3f}", "Root mean squared error", ACCENT_BLUE)
+    add_metric_pill(metrics_container, "MAE", f"{performance['mae']:.3f}", "Mean absolute error", ACCENT_AMBER)
+    add_metric_pill(metrics_container, "DATA SPLIT", f"{summary['training_samples']} / {summary['testing_samples']}", "Train / Test sample count", PRIMARY_COLOR)
+
+    # ==============================================================
+    # TAB 2: VISUAL ANALYTICS (STATISTICAL DASHBOARD - NO SOIL GRAPHS)
+    # ==============================================================
+    graphs_scroll = create_scrollable_container(tab_graphs)
+
+    # Explanatory Guide Banner above the charts
+    guide_frame = tk.Frame(graphs_scroll, bg="#EBF3EB", bd=1, relief="solid", highlightbackground="#C8DBC8", padx=16, pady=10)
+    guide_frame.pack(fill="x", padx=25, pady=(12, 0))
+
+    tk.Label(
+        guide_frame,
+        text="📊 Guide to Charts:  (1) Yield Over Time tracks historical harvests and upcoming forecast.  "
+             "(2) Distribution benchmarks this prediction against typical yields for this crop.  "
+             "(3) Prediction Residuals show historical model error margins (Actual − Fitted).  "
+             "(4) Categories show the proportion of past seasons achieving High, Moderate, or Low yields.",
+        bg="#EBF3EB",
+        fg=PRIMARY_COLOR,
+        font=("Segoe UI", 9),
+        wraplength=1050,
+        justify="left"
+    ).pack(anchor="w")
+
+    graph_wrapper = tk.Frame(graphs_scroll, bg=BG_COLOR)
+    graph_wrapper.pack(fill="both", expand=True, padx=25, pady=12)
+
+    fig = Figure(figsize=(11.5, 9.2), dpi=100, facecolor="#FFFFFF")
+    active_figures.append(fig)
+    axs = fig.subplots(2, 2)
+    fig.subplots_adjust(hspace=0.40, wspace=0.28, left=0.08, right=0.96, top=0.93, bottom=0.08)
+
+    # -------------------------------------------------------------
+    # 1. Line Chart: Historical Actual vs Predicted Yield Trajectory
+    # -------------------------------------------------------------
+    ax1 = axs[0, 0]
+    ax1.set_facecolor("#FAFCFA")
+    years = history["Year"].values
+    actuals = history["Yield"].values
+    preds = history["Predicted"].values
+
+    ax1.plot(years, actuals, marker="o", markersize=6, color="#2E7D32", linewidth=2.2, label="Actual Yield")
+    ax1.plot(years, preds, marker="s", markersize=5, color="#1565C0", linestyle="--", linewidth=1.8, label="Model Fitted")
+
+    # Future forecast point
+    next_yr = int(years[-1]) + 1
+    ax1.plot([years[-1], next_yr], [actuals[-1], pred_val], color="#E65100", linestyle=":", linewidth=1.8)
+    ax1.plot(next_yr, pred_val, marker="*", markersize=14, color="#E65100", label=f"Forecast ({next_yr})")
+
+    # Callout on forecast star
+    ax1.annotate(
+        f"Forecast\n{pred_val:.2f} t/ha",
+        xy=(next_yr, pred_val),
+        xytext=(0, 12),
+        textcoords="offset points",
+        ha="center",
+        fontsize=8,
+        fontweight="bold",
+        color="#E65100",
+        bbox=dict(boxstyle="round,pad=0.25", fc="#FFF3E0", ec="#E65100", lw=1)
+    )
+
+    ax1.set_xlim(years[0] - 0.4, next_yr + 0.6)
+    ax1.set_title(f"Yield Over Time: {crop.title()} ({district.title()})", fontsize=11, fontweight="bold", color=PRIMARY_COLOR)
+    ax1.set_xlabel("Harvest Year", fontsize=9, color=TEXT_COLOR)
+    ax1.set_ylabel("Yield (Tonnes / Ha)", fontsize=9, color=TEXT_COLOR)
+    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax1.grid(True, linestyle=":", alpha=0.6)
+    ax1.legend(fontsize=8, loc="best", framealpha=0.9)
+
+    # -------------------------------------------------------------
+    # 2. Histogram & Density Curve: Regional Crop Yield Distribution
+    # -------------------------------------------------------------
+    ax2 = axs[0, 1]
+    ax2.set_facecolor("#FAFCFA")
+
+    sample_yields = crop_yield_series if len(crop_yield_series) > 10 else actuals
+    n_bins = min(22, max(8, int(len(sample_yields) ** 0.5)))
+
+    counts, bins, _ = ax2.hist(
+        sample_yields,
+        bins=n_bins,
+        color="#81C784",
+        edgecolor="#2E7D32",
+        alpha=0.65,
+        density=True,
+        label="Yield Frequency"
+    )
+
+    mu = float(np.mean(sample_yields))
+    sigma = max(0.01, float(np.std(sample_yields)))
+    x_axis = np.linspace(min(sample_yields), max(sample_yields), 100)
+    pdf = (1.0 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_axis - mu) / sigma) ** 2)
+    ax2.plot(x_axis, pdf, color="#1B5E20", linewidth=1.8, label="Normal Curve")
+
+    ax2.axvline(pred_val, color="#D32F2F", linestyle="--", linewidth=2.0, label=f"Forecast: {pred_val:.2f} t/ha")
+    ax2.axvline(mu, color="#1565C0", linestyle=":", linewidth=1.5, label=f"Mean: {mu:.2f} t/ha")
+
+    diff_pct = ((pred_val - mu) / mu) * 100 if mu > 0 else 0
+    ax2.text(
+        0.04, 0.90,
+        f"Benchmark: {'+' if diff_pct >= 0 else ''}{diff_pct:.1f}% vs Regional Mean",
+        transform=ax2.transAxes,
+        fontsize=8,
+        fontweight="bold",
+        color=PRIMARY_COLOR,
+        bbox=dict(boxstyle="round,pad=0.25", fc="#E8F5E9", ec="#A5D6A7", lw=1)
+    )
+
+    ax2.set_title(f"Yield Distribution & Benchmark ({crop.title()})", fontsize=11, fontweight="bold", color=PRIMARY_COLOR)
+    ax2.set_xlabel("Yield (Tonnes / Ha)", fontsize=9, color=TEXT_COLOR)
+    ax2.set_ylabel("Probability Density", fontsize=9, color=TEXT_COLOR)
+    ax2.grid(True, linestyle=":", alpha=0.6)
+    ax2.legend(fontsize=8, loc="upper right", framealpha=0.9)
+
+    # -------------------------------------------------------------
+    # 3. Bar Chart: Model Residual Calibration Errors (Actual - Predicted)
+    # -------------------------------------------------------------
+    ax3 = axs[1, 0]
+    ax3.set_facecolor("#FAFCFA")
+    residuals = history["Residual"].values
+
+    bar_colors = ["#2E7D32" if r >= 0 else "#C62828" for r in residuals]
+    bars = ax3.bar(years, residuals, color=bar_colors, width=0.45, edgecolor="#333333", alpha=0.85)
+    ax3.axhline(0, color="#1C251D", linestyle="-", linewidth=1.2)
+
+    for bar, val in zip(bars, residuals):
+        y_offset = 0.015 if val >= 0 else -0.035
+        ax3.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + y_offset,
+            f"{val:+.2f}",
+            ha="center",
+            va="bottom" if val >= 0 else "top",
+            fontsize=8,
+            fontweight="bold",
+            color=TEXT_COLOR
+        )
+
+    y_min, y_max = min(residuals), max(residuals)
+    margin = max(0.12, max(abs(y_min), abs(y_max)) * 0.35)
+    ax3.set_ylim(min(y_min - margin, -0.12), max(y_max + margin, 0.12))
+
+    ax3.set_title("Historical Error Margins (Actual − Predicted)", fontsize=11, fontweight="bold", color=PRIMARY_COLOR)
+    ax3.set_xlabel("Harvest Year", fontsize=9, color=TEXT_COLOR)
+    ax3.set_ylabel("Residual (t/ha)", fontsize=9, color=TEXT_COLOR)
+    ax3.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax3.grid(True, linestyle=":", alpha=0.6)
+
+    # -------------------------------------------------------------
+    # 4. Pie Diagram: Productivity Tier Breakdown (Modern Donut)
+    # -------------------------------------------------------------
+    ax4 = axs[1, 1]
+    ax4.set_facecolor("#FAFCFA")
+
+    tier_high = int((sample_yields >= 2.5).sum())
+    tier_moderate = int(((sample_yields >= 1.5) & (sample_yields < 2.5)).sum())
+    tier_low = int((sample_yields < 1.5).sum())
+
+    tier_sizes = [tier_high, tier_moderate, tier_low]
+    tier_labels = ["High (≥2.5 t/ha)", "Moderate (1.5–2.5)", "Low (<1.5 t/ha)"]
+    tier_colors = ["#2E7D32", "#FFA000", "#D32F2F"]
+
+    filtered_sizes = []
+    filtered_labels = []
+    filtered_colors = []
+    for s, l, c in zip(tier_sizes, tier_labels, tier_colors):
+        if s > 0:
+            filtered_sizes.append(s)
+            filtered_labels.append(l)
+            filtered_colors.append(c)
+
+    if filtered_sizes:
+        wedges, texts, autotexts = ax4.pie(
+            filtered_sizes,
+            labels=filtered_labels,
+            colors=filtered_colors,
+            autopct="%1.1f%%",
+            startangle=140,
+            pctdistance=0.75,
+            textprops={"fontsize": 8, "color": TEXT_COLOR}
+        )
+        for autotext in autotexts:
+            autotext.set_color("white")
+            autotext.set_fontweight("bold")
+            autotext.set_fontsize(8)
+
+        centre_circle = Circle((0, 0), 0.52, fc="white")
+        ax4.add_artist(centre_circle)
+        ax4.text(0, 0.05, f"{len(sample_yields)}", ha="center", va="center", fontsize=14, fontweight="bold", color=PRIMARY_COLOR)
+        ax4.text(0, -0.15, "Past Records", ha="center", va="center", fontsize=8, color=MUTED_TEXT)
+        ax4.axis("equal")
+    else:
+        ax4.text(0.5, 0.5, "Data Unavailable", ha="center", va="center")
+
+    ax4.set_title(f"Productivity Tier Breakdown ({crop.title()})", fontsize=11, fontweight="bold", color=PRIMARY_COLOR)
+
+    # Render Matplotlib Canvas
+    canvas = FigureCanvasTkAgg(fig, master=graph_wrapper)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    graph_wrapper.update_idletasks()
+    if hasattr(graphs_scroll, "_parent_canvas"):
+        graphs_scroll._parent_canvas.configure(scrollregion=graphs_scroll._parent_canvas.bbox("all"))
+
+    # ==============================================================
+    # TAB 3: HISTORICAL RECORDS
+    # ==============================================================
+    hist_frame = tk.Frame(tab_history, bg=BG_COLOR, padx=25, pady=16)
+    hist_frame.pack(fill="both", expand=True)
+
+    tk.Label(
+        hist_frame,
+        text=f"Historical Yield Records: {district.title()}, {state.title()}",
+        bg=BG_COLOR,
+        fg=PRIMARY_COLOR,
+        font=("Segoe UI", 12, "bold")
+    ).pack(anchor="w", pady=(0, 10))
+
+    create_styled_tree(hist_frame, history)
+
+    # ==============================================================
+    # TAB 4: WEATHER & SOIL DATA
+    # ==============================================================
+    weather_frame = tk.Frame(tab_weather, bg=BG_COLOR, padx=25, pady=16)
+    weather_frame.pack(fill="both", expand=True)
+
+    tk.Label(
+        weather_frame,
+        text="Weather & Soil Readings Over Time",
+        bg=BG_COLOR,
+        fg=PRIMARY_COLOR,
+        font=("Segoe UI", 12, "bold")
+    ).pack(anchor="w", pady=(0, 10))
+
+    create_styled_tree(weather_frame, weather)
+
+    # ==============================================================
+    # TAB 5: REPRESENTATIVE FEATURES
+    # ==============================================================
+    feat_frame = tk.Frame(tab_features, bg=BG_COLOR, padx=25, pady=16)
+    feat_frame.pack(fill="both", expand=True)
+
+    tk.Label(
+        feat_frame,
+        text="Values Used for This Prediction",
+        bg=BG_COLOR,
+        fg=PRIMARY_COLOR,
+        font=("Segoe UI", 12, "bold")
+    ).pack(anchor="w", pady=(0, 10))
+
+    create_styled_tree(feat_frame, features)
+
+    # ==============================================================
+    # TAB 6: SUMMARY
+    # ==============================================================
+    summary_scroll = create_scrollable_container(tab_summary)
+
+    scope_card = create_card_frame(summary_scroll, title="📁 Dataset Scope", padx=30, pady=12)
+    s_grid = tk.Frame(scope_card, bg=CARD_BG)
+    s_grid.pack(fill="x")
+
+    scope_rows = [
+        ("Total Records in Dataset", f"{summary['total_records']:,}"),
+        (f"Records for {crop.title()}", f"{summary['crop_records']:,}"),
+        (f"Records for {district.title()}", f"{summary['historical_records']}"),
+        ("Training Samples (80%)", f"{summary['training_samples']:,}"),
+        ("Testing Samples (20%)", f"{summary['testing_samples']:,}")
     ]
 
-    for i, (label, value) in enumerate(history_data):
-        tk.Label(history_card, text=label, bg="white", fg="#1B5E20",
-                 font=("Segoe UI",11,"bold")).grid(row=i, column=0, padx=20, pady=8, sticky="w")
-        tk.Label(history_card, text=f"{value:.3f}", bg="white",
-                 fg="#1565C0", font=("Segoe UI",11)).grid(row=i, column=1, padx=20, sticky="w")
+    for idx, (label, val) in enumerate(scope_rows):
+        tk.Label(s_grid, text=label, bg=CARD_BG, fg=MUTED_TEXT, font=("Segoe UI", 10)).grid(row=idx, column=0, sticky="w", pady=4)
+        tk.Label(s_grid, text=val, bg=CARD_BG, fg=PRIMARY_COLOR, font=("Segoe UI", 10, "bold")).grid(row=idx, column=1, sticky="w", padx=30, pady=4)
 
-    add_navigation(summary_nav)
+    stat_card = create_card_frame(summary_scroll, title="📈 Yield Statistics", padx=30, pady=12)
+    stat_grid = tk.Frame(stat_card, bg=CARD_BG)
+    stat_grid.pack(fill="x")
 
-    # ======================================================
-    # 📊 GRAPHS TAB (NO FEATURE IMPORTANCE, NO SOIL NUTRIENTS)
-    # ======================================================
+    dist_rows = [
+        ("Minimum Yield in Dataset", f"{summary['yield_min']:.3f} t/ha"),
+        ("Maximum Yield in Dataset", f"{summary['yield_max']:.3f} t/ha"),
+        ("Average Yield in Dataset", f"{summary['yield_mean']:.3f} t/ha"),
+        ("District 5-Year Average", f"{summary['historical_mean']:.3f} t/ha"),
+        ("District 5-Year Median", f"{summary['historical_median']:.3f} t/ha"),
+        ("District Standard Deviation", f"{summary['historical_std']:.3f} t/ha")
+    ]
 
-    sns.set_style("whitegrid")
+    for idx, (label, val) in enumerate(dist_rows):
+        tk.Label(stat_grid, text=label, bg=CARD_BG, fg=MUTED_TEXT, font=("Segoe UI", 10)).grid(row=idx, column=0, sticky="w", pady=4)
+        tk.Label(stat_grid, text=val, bg=CARD_BG, fg=SECONDARY_COLOR, font=("Segoe UI", 10, "bold")).grid(row=idx, column=1, sticky="w", padx=30, pady=4)
 
-    graphs_tab = tk.Frame(notebook)
-    notebook.add(graphs_tab, text="📊 Graphs")
+    # Attach universal mousewheel and keyboard scrolling
+    setup_window_scrolling(window, notebook)
 
-    graphs_content, graphs_nav = create_tab_layout(graphs_tab, "📊 Regression Graphs")
-
-    graph_frame = tk.Frame(graphs_content, bg="#F4F8F4")
-    graph_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-    def add_graph(fig, parent):
-        canvas = FigureCanvasTkAgg(fig, master=parent)
-        canvas.draw()
-        widget = canvas.get_tk_widget()
-        widget.pack(fill="both", expand=True, pady=20)
-
-    # Yield Trend
-    fig1, ax1 = plt.subplots(figsize=(7,4))
-    ax1.plot(result["history"]["Year"], result["history"]["Yield"], marker="o", color="#2E7D32")
-    ax1.set_title("Yield Trend Over Years", fontsize=14)
-    ax1.set_xlabel("Year")
-    ax1.set_ylabel("Yield (Tonnes/Hectare)")
-    add_graph(fig1, graph_frame)
-
-    # Rainfall vs Yield
-    fig2, ax2 = plt.subplots(figsize=(7,4))
-    ax2.scatter(result["weather"]["Rainfall"], result["weather"]["Yield"], color="#1565C0")
-    ax2.set_title("Rainfall vs Yield", fontsize=14)
-    ax2.set_xlabel("Rainfall (mm)")
-    ax2.set_ylabel("Yield (Tonnes/Hectare)")
-    add_graph(fig2, graph_frame)
-
-    # Residual Plot (Simple)
-    actual = result["history"]["Yield"]
-    predicted = [prediction["predicted_yield"]] * len(actual)
-    residuals = actual - predicted
-
-    fig3, ax3 = plt.subplots(figsize=(7,4))
-    ax3.scatter(predicted, residuals, color="#8E24AA")
-    ax3.axhline(0, color="black", linestyle="--")
-    ax3.set_title("Residual Plot", fontsize=14)
-    ax3.set_xlabel("Predicted Yield")
-    ax3.set_ylabel("Residual (Actual - Predicted)")
-    add_graph(fig3, graph_frame)
-
-    add_navigation(graphs_nav)
+    return window

@@ -1,12 +1,16 @@
-# ============================================================
-# CROP YIELD PREDICTION - DETAILED REPORT
-# ============================================================
-
+import os
 import sys
+import warnings
 import numpy as np
 import pandas as pd
 import joblib
-import os
+
+# Suppress minor version pickle warnings from scikit-learn
+try:
+    from sklearn.exceptions import InconsistentVersionWarning
+    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+except ImportError:
+    pass
 
 # Compatibility shim for NumPy 2.x pickles loaded in NumPy 1.x environments
 if int(np.__version__.split(".")[0]) < 2 and "numpy._core" not in sys.modules:
@@ -19,72 +23,77 @@ if int(np.__version__.split(".")[0]) < 2 and "numpy._core" not in sys.modules:
         sys.modules["numpy._core._multiarray_umath"] = _umath
     except Exception:
         pass
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score
-)
 
-# ============================================================
-# LOAD DATASET
-# ============================================================
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET = os.path.join(BASE_DIR, "final_merged_and_cleaned_dataset_3.csv")
+DATASET_PATH = os.path.join(BASE_DIR, "final_merged_and_cleaned_dataset_3.csv")
 
-data = pd.read_csv(DATASET)
-
-# Fill missing values
-for col in data.columns:
-
-    if data[col].dtype in ["int64", "float64"]:
-
-        data[col] = data[col].fillna(data[col].median())
-
-    else:
-
-        data[col] = data[col].fillna(data[col].mode()[0])
+# Global caches for lazy loading and rapid sub-millisecond inference
+_DATASET_CACHE = None
+_MODEL_CACHE = {}
 
 
-# ============================================================
-# MAIN FUNCTION
-# ============================================================
+def clean_name(name):
+    """Normalize crop/feature name for model file lookup."""
+    return (
+        str(name)
+        .lower()
+        .strip()
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("&", "_")
+        .replace("(", "")
+        .replace(")", "")
+        .replace(".", "")
+        .replace(",", "")
+    )
 
-def detailed_prediction(state, district, crop, season, model_type="rf"):
 
-    # Normalize model_type
-    model_type = "linear" if "linear" in str(model_type).lower() else "rf"
+def get_dataset():
+    """Lazy load and cache the cleaned dataset."""
+    global _DATASET_CACHE
+    if _DATASET_CACHE is None:
+        if not os.path.exists(DATASET_PATH):
+            raise FileNotFoundError(f"Dataset not found at {DATASET_PATH}")
 
-    # --------------------------------------------------------
-    # Filter selected crop
-    # --------------------------------------------------------
+        df = pd.read_csv(DATASET_PATH)
+        df.columns = df.columns.str.strip()
 
-    crop_data = data[
-        (data["crop_name"].str.lower() == crop.lower()) &
-        (data["yield"] > 0)
-    ].copy()
+        # Fill missing values: median for numeric, mode for categorical
+        for col in df.columns:
+            if df[col].dtype in ["int64", "float64"]:
+                df[col] = df[col].fillna(df[col].median())
+            else:
+                df[col] = df[col].astype(str).str.strip().fillna(df[col].mode()[0])
 
-    if crop_data.empty:
-        raise ValueError("No records found for selected crop.")
+        _DATASET_CACHE = df
+    return _DATASET_CACHE
 
-    # --------------------------------------------------------
-    # Prepare ML data
-    # --------------------------------------------------------
-    def clean_name(name):
-        return (
-            name.lower()
-            .replace(" ", "_")
-            .replace("/", "_")
-            .replace("&", "_")
-            .replace("(", "")
-            .replace(")", "")
-            .replace(".", "")
-            .replace(",", "")
-        )
+
+def get_trained_crops():
+    """Return a set of clean crop slugs that have both RF and Ridge models available."""
+    rf_dir = os.path.join(BASE_DIR, "models", "rf")
+    linear_dir = os.path.join(BASE_DIR, "models", "linear")
+
+    rf_models = {f.replace("_model.pkl", "") for f in os.listdir(rf_dir) if f.endswith("_model.pkl")} if os.path.exists(rf_dir) else set()
+    lin_models = {f.replace("_model.pkl", "") for f in os.listdir(linear_dir) if f.endswith("_model.pkl")} if os.path.exists(linear_dir) else set()
+
+    return rf_models & lin_models
+
+
+def load_model_and_metrics(crop, model_type="rf"):
+    """
+    Retrieve trained model and metrics from memory cache or disk.
+    Supported model_type values: 'rf' (Random Forest) or 'linear' / 'ridge' (Ridge Regression).
+    """
+    subfolder = "linear" if "lin" in str(model_type).lower() or "ridge" in str(model_type).lower() else "rf"
     crop_file = clean_name(crop)
+    cache_key = f"{subfolder}:{crop_file}"
 
-    # Check model directory: models/<model_type>/ first, fallback to models/
-    subfolder = "linear" if model_type == "linear" else "rf"
+    if cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
+
     model_path = os.path.join(BASE_DIR, "models", subfolder, f"{crop_file}_model.pkl")
     metrics_path = os.path.join(BASE_DIR, "models", subfolder, f"{crop_file}_metrics.pkl")
 
@@ -93,338 +102,284 @@ def detailed_prediction(state, district, crop, season, model_type="rf"):
     if not os.path.exists(metrics_path):
         metrics_path = os.path.join(BASE_DIR, "models", f"{crop_file}_metrics.pkl")
 
+    model_display = "Ridge Regression" if subfolder == "linear" else "Random Forest"
     if not os.path.exists(model_path):
-        model_name_str = "Linear Regression" if model_type == "linear" else "Random Forest"
-        raise FileNotFoundError(f"{model_name_str} model not found for {crop}")
-
+        raise FileNotFoundError(f"{model_display} model not found for crop: {crop}")
     if not os.path.exists(metrics_path):
-        model_name_str = "Linear Regression" if model_type == "linear" else "Random Forest"
-        raise FileNotFoundError(f"{model_name_str} metrics file not found for {crop}")
+        raise FileNotFoundError(f"{model_display} metrics file not found for crop: {crop}")
 
-    # Load trained model
     model = joblib.load(model_path)
-
-    # Get feature names stored inside the model
-    expected_columns = model.feature_names_in_
-
-    # Load saved performance metrics
     metrics = joblib.load(metrics_path)
 
-    mae = metrics["mae"]
-    mse = metrics["mse"]
-    rmse = metrics["rmse"]
-    r2 = metrics["r2"]
+    _MODEL_CACHE[cache_key] = (model, metrics, subfolder)
+    return model, metrics, subfolder
 
-    training_samples = metrics["training_samples"]
-    testing_samples = metrics["testing_samples"]
-    # ============================================================
-    # FILTER HISTORICAL RECORDS
-    # ============================================================
 
+def detailed_prediction(state, district, crop, season, model_type="rf"):
+    """
+    Generate comprehensive crop yield prediction, historical analysis,
+    and validation metrics for the specified location and crop.
+    """
+    data = get_dataset()
+
+    # Filter crop records with positive yield
+    crop_data = data[
+        (data["crop_name"].str.lower() == str(crop).strip().lower()) &
+        (data["yield"] > 0)
+    ].copy()
+
+    if crop_data.empty:
+        raise ValueError(f"No records found for crop '{crop}' with positive yield.")
+
+    # Load model & metrics (supports RF and Ridge)
+    model, metrics, resolved_type = load_model_and_metrics(crop, model_type)
+    expected_columns = getattr(model, "feature_names_in_", None)
+
+    # Filter historical records matching state, district, season
     filtered = crop_data[
-        (crop_data["state_name"].str.lower() == state.lower()) &
-        (crop_data["district_name"].str.lower() == district.lower()) &
-        (crop_data["season"].str.lower() == season.lower())
+        (crop_data["state_name"].str.lower() == str(state).strip().lower()) &
+        (crop_data["district_name"].str.lower() == str(district).strip().lower()) &
+        (crop_data["season"].str.lower() == str(season).strip().lower())
     ].copy()
 
     if filtered.empty:
-        raise ValueError(
-            "No historical records found for the selected inputs."
-        )
+        raise ValueError(f"No historical records found for {crop} in {district}, {state} ({season} season).")
 
+    # Select the most recent 5-year historical window and sort chronologically
     latest_year = filtered["year"].max()
-
-    filtered = filtered[
-        filtered["year"].between(
-            latest_year - 4,
-            latest_year
-        )
-    ]
-
-    latest = filtered.sort_values("year").iloc[-1]
-
-    # ============================================================
-    # MODEL VALIDATION
-    # ============================================================
-
-    sample = (
-        filtered
-        .sort_values("year", ascending=False)
-        .iloc[[0]]
-        .copy()
+    filtered = (
+        filtered[filtered["year"].between(latest_year - 4, latest_year)]
+        .sort_values("year")
+        .reset_index(drop=True)
     )
 
-    actual_yield = sample["yield"].iloc[0]
+    latest = filtered.iloc[-1]
 
-    sample = sample.drop(columns=[
-        "yield",
-        "yield_unit",
-        "year",
-        "district_code",
-        "crop_code"
-    ])
+    # Predict for each historical year using that year's recorded features
+    historical_predictions = []
+    historical_residuals = []
 
-    sample = pd.get_dummies(sample)
+    drop_cols = ["yield", "yield_unit", "year", "district_code", "crop_code"]
+    for _, hist_row in filtered.iterrows():
+        sample_df = pd.DataFrame([hist_row.to_dict()]).drop(columns=[c for c in drop_cols if c in hist_row])
+        sample_encoded = pd.get_dummies(sample_df)
+        if expected_columns is not None:
+            sample_encoded = sample_encoded.reindex(columns=expected_columns, fill_value=0)
+        pred_val = max(0.0, float(model.predict(sample_encoded)[0]))
+        historical_predictions.append(pred_val)
+        historical_residuals.append(float(hist_row["yield"] - pred_val))
 
-    sample = sample.reindex(
-        columns=expected_columns,
-        fill_value=0
-    )
+    # Single-point validation on latest year
+    actual_yield = float(latest["yield"])
+    validation_prediction = historical_predictions[-1]
+    prediction_error = abs(actual_yield - validation_prediction)
 
-    predicted_sample = model.predict(sample)[0]
-
-    prediction_error = abs(
-        actual_yield - predicted_sample
-    )
-
-    # ============================================================
-    # REPRESENTATIVE FEATURES
-    # ============================================================
-
+    # Environmental numeric features
     numeric_features = [
-
-        "boron",
-        "copper",
-        "electrical_conductivity",
-        "iron",
-        "manganese",
-        "nitrogen",
-        "organic_carbon",
-        "phosphorus",
-        "potassium",
-        "soil_ph",
-        "sulphur",
-        "zinc",
-        "average_rainfall",
-        "average_temperature"
-
+        "boron", "copper", "electrical_conductivity", "iron", "manganese",
+        "nitrogen", "organic_carbon", "phosphorus", "potassium", "soil_ph",
+        "sulphur", "zinc", "average_rainfall", "average_temperature"
     ]
 
+    # Build representative feature profile (5-year median conditions)
     prediction_row = {}
-
-    for feature in numeric_features:
-
-        prediction_row[feature] = filtered[
-            feature
-        ].median()
+    for feat in numeric_features:
+        if feat in filtered.columns:
+            prediction_row[feat] = float(filtered[feat].median())
+        else:
+            prediction_row[feat] = 0.0
 
     prediction_row["state_name"] = latest["state_name"]
-
     prediction_row["district_name"] = latest["district_name"]
-
     prediction_row["crop_name"] = latest["crop_name"]
-
     prediction_row["season"] = latest["season"]
-
-    prediction_row["crop_type"] = latest["crop_type"]
+    prediction_row["crop_type"] = latest.get("crop_type", "")
 
     prediction_df = pd.DataFrame([prediction_row])
-
     prediction_df = pd.get_dummies(prediction_df)
+    if expected_columns is not None:
+        prediction_df = prediction_df.reindex(columns=expected_columns, fill_value=0)
 
-    prediction_df = prediction_df.reindex(
-        columns=expected_columns,
-        fill_value=0
-    )
+    predicted_yield = max(0.0, float(model.predict(prediction_df)[0]))
 
-    # ============================================================
-    # FINAL PREDICTION
-    # ============================================================
+    # Chronologically sorted history table with genuine model predictions and residuals
+    history = pd.DataFrame({
+        "Year": filtered["year"].astype(int),
+        "Yield": filtered["yield"].round(3),
+        "Predicted": [round(p, 3) for p in historical_predictions],
+        "Residual": [round(r, 3) for r in historical_residuals],
+        "Rainfall (mm)": filtered["average_rainfall"].round(1),
+        "Temperature (°C)": filtered["average_temperature"].round(1)
+    })
 
-    predicted = model.predict(
-        prediction_df
-    )[0]
-
-    # ============================================================
-    # HISTORICAL DATA
-    # ============================================================
-
-    history = filtered[
-        [
-            "year",
-            "yield",
-            "average_rainfall",
-            "average_temperature"
-        ]
-    ].copy()
-
-    history.columns = [
-        "Year",
-        "Yield",
-        "Rainfall (mm)",
-        "Temperature (°C)"
+    # Weather & Soil full parameter profile table
+    weather_cols = [
+        "year", "average_rainfall", "average_temperature",
+        "nitrogen", "phosphorus", "potassium", "soil_ph", "organic_carbon",
+        "zinc", "iron", "copper", "boron", "manganese", "sulphur", "yield"
     ]
+    avail_weather_cols = [c for c in weather_cols if c in filtered.columns]
+    weather = filtered[avail_weather_cols].copy()
 
-    # ============================================================
-    # WEATHER & SOIL DATA
-    # ============================================================
+    rename_map = {
+        "year": "Year",
+        "average_rainfall": "Rainfall (mm)",
+        "average_temperature": "Temp (°C)",
+        "nitrogen": "Nitrogen (N)",
+        "phosphorus": "Phosphorus (P)",
+        "potassium": "Potassium (K)",
+        "soil_ph": "Soil pH",
+        "organic_carbon": "Organic C (%)",
+        "zinc": "Zinc (Zn)",
+        "iron": "Iron (Fe)",
+        "copper": "Copper (Cu)",
+        "boron": "Boron (B)",
+        "manganese": "Manganese (Mn)",
+        "sulphur": "Sulphur (S)",
+        "yield": "Yield (t/ha)"
+    }
+    weather.rename(columns=rename_map, inplace=True)
 
-    weather = filtered[
-        [
-            "year",
-            "average_rainfall",
-            "average_temperature",
-            "nitrogen",
-            "phosphorus",
-            "potassium",
-            "soil_ph",
-            "organic_carbon",
-            "zinc",
-            "iron",
-            "copper",
-            "boron",
-            "manganese",
-            "sulphur",
-            "yield"
-        ]
-    ].copy()
+    # Feature breakdown table
+    feature_display_names = {
+        "state_name": "State",
+        "district_name": "District",
+        "crop_name": "Crop Name",
+        "season": "Cultivation Season",
+        "crop_type": "Crop Category",
+        "average_rainfall": "Average Rainfall (mm)",
+        "average_temperature": "Average Temperature (°C)",
+        "nitrogen": "Soil Nitrogen (N)",
+        "phosphorus": "Soil Phosphorus (P)",
+        "potassium": "Soil Potassium (K)",
+        "soil_ph": "Soil pH Level",
+        "organic_carbon": "Organic Carbon (%)",
+        "zinc": "Zinc (Zn, ppm)",
+        "iron": "Iron (Fe, ppm)",
+        "copper": "Copper (Cu, ppm)",
+        "boron": "Boron (B, ppm)",
+        "manganese": "Manganese (Mn, ppm)",
+        "sulphur": "Sulphur (S, ppm)",
+        "electrical_conductivity": "Electrical Conductivity (dS/m)"
+    }
 
-    weather.columns = [
-        "Year",
-        "Rainfall",
-        "Temperature",
-        "Nitrogen",
-        "Phosphorus",
-        "Potassium",
-        "Soil pH",
-        "Organic Carbon",
-        "Zinc",
-        "Iron",
-        "Copper",
-        "Boron",
-        "Manganese",
-        "Sulphur",
-        "Yield"
-    ]
-    # ============================================================
-    # DATASET SUMMARY
-    # ============================================================
+    feature_rows = []
+    for k, v in prediction_row.items():
+        label = feature_display_names.get(k, k.replace("_", " ").title())
+        val_str = f"{v:.3f}" if isinstance(v, float) else str(v)
+        feature_rows.append({"Feature": label, "Representative Value": val_str})
+
+    feature_table = pd.DataFrame(feature_rows)
+
+    model_display_name = "Ridge Regression" if resolved_type == "linear" else "Random Forest Regressor"
 
     summary = {
-
         "total_records": int(len(data)),
-
         "crop_records": int(len(crop_data)),
-
         "historical_records": int(len(filtered)),
-
-        "training_samples": training_samples,
-
-        "testing_samples": testing_samples,
-
+        "training_samples": int(metrics.get("training_samples", 0)),
+        "testing_samples": int(metrics.get("testing_samples", 0)),
         "yield_min": float(data["yield"].min()),
-
         "yield_max": float(data["yield"].max()),
-
         "yield_mean": float(data["yield"].mean()),
-
         "historical_mean": float(filtered["yield"].mean()),
-
-        "historical_median": float(filtered["yield"].median())
-
+        "historical_median": float(filtered["yield"].median()),
+        "historical_std": float(filtered["yield"].std()) if len(filtered) > 1 else 0.0
     }
-
-    # ============================================================
-    # REPRESENTATIVE FEATURES TABLE
-    # ============================================================
-
-    feature_table = pd.DataFrame(
-        list(prediction_row.items()),
-        columns=["Feature", "Value"]
-    )
-
-    # ============================================================
-    # RETURN EVERYTHING TO GUI
-    # ============================================================
 
     return {
-
         "prediction": {
-
             "state": state,
-
             "district": district,
-
             "crop": crop,
-
             "season": season,
-
-            "model_type": "Linear Regression" if model_type == "linear" else "Random Forest",
-
-            "predicted_yield": float(predicted),
-
-            "actual_yield": float(actual_yield),
-
-            "validation_prediction": float(predicted_sample),
-
-            "prediction_error": float(prediction_error)
-
+            "model_type": model_display_name,
+            "model_key": resolved_type,
+            "predicted_yield": predicted_yield,
+            "actual_yield": actual_yield,
+            "validation_prediction": validation_prediction,
+            "prediction_error": prediction_error,
+            "historical_predictions": historical_predictions,
+            "historical_residuals": historical_residuals,
+            "latest_year": int(latest_year)
         },
-
         "performance": {
-
-            "mae": float(mae),
-
-            "mse": float(mse),
-
-            "rmse": float(rmse),
-
-            "r2": float(r2)
-
+            "mae": float(metrics.get("mae", 0.0)),
+            "mse": float(metrics.get("mse", 0.0)),
+            "rmse": float(metrics.get("rmse", 0.0)),
+            "r2": float(metrics.get("r2", 0.0))
         },
-
         "history": history,
-
         "weather": weather,
-
         "features": feature_table,
-
-        "summary": summary
-
+        "summary": summary,
+        "crop_yield_series": crop_data["yield"].dropna().values
     }
 
-# ============================================================
-# SIMPLE PREDICTION FUNCTION FOR MAIN GUI
-# ============================================================
 
 def predict_crop(state, district, crop, season, model_type="rf"):
-    """
-    Lightweight wrapper for the main GUI.
-    Returns the prediction and metrics for either 'linear' or 'rf'.
-    """
+    """Lightweight inference function for GUI display."""
+    res = detailed_prediction(state, district, crop, season, model_type=model_type)
+    return {
+        "predicted_yield": res["prediction"]["predicted_yield"],
+        "model_type": res["prediction"]["model_type"],
+        "model_key": res["prediction"]["model_key"],
+        "mae": res["performance"]["mae"],
+        "mse": res["performance"]["mse"],
+        "rmse": res["performance"]["rmse"],
+        "r2": res["performance"]["r2"],
+        "actual_yield": res["prediction"]["actual_yield"],
+        "validation_prediction": res["prediction"]["validation_prediction"],
+        "prediction_error": res["prediction"]["prediction_error"],
+        "training_samples": res["summary"]["training_samples"],
+        "testing_samples": res["summary"]["testing_samples"]
+    }
 
-    result = detailed_prediction(state, district, crop, season, model_type=model_type)
+
+def compare_models(state, district, crop, season):
+    """
+    Run both Random Forest and Ridge Regression simultaneously
+    and return a structured comparison.
+    """
+    rf_res = detailed_prediction(state, district, crop, season, model_type="rf")
+    lin_res = detailed_prediction(state, district, crop, season, model_type="linear")
+
+    rf_yield = rf_res["prediction"]["predicted_yield"]
+    lin_yield = lin_res["prediction"]["predicted_yield"]
+    diff = abs(rf_yield - lin_yield)
+    avg_yield = (rf_yield + lin_yield) / 2.0
 
     return {
-        "predicted_yield": result["prediction"]["predicted_yield"],
-        "model_type": result["prediction"]["model_type"],
-        "mae": result["performance"]["mae"],
-        "mse": result["performance"]["mse"],
-        "rmse": result["performance"]["rmse"],
-        "r2": result["performance"]["r2"],
-        "training_samples": result["summary"]["training_samples"],
-        "testing_samples": result["summary"]["testing_samples"]
+        "rf": {
+            "predicted_yield": rf_yield,
+            "r2": rf_res["performance"]["r2"],
+            "rmse": rf_res["performance"]["rmse"],
+            "mae": rf_res["performance"]["mae"],
+            "actual_yield": rf_res["prediction"]["actual_yield"],
+            "validation_prediction": rf_res["prediction"]["validation_prediction"]
+        },
+        "ridge": {
+            "predicted_yield": lin_yield,
+            "r2": lin_res["performance"]["r2"],
+            "rmse": lin_res["performance"]["rmse"],
+            "mae": lin_res["performance"]["mae"],
+            "actual_yield": lin_res["prediction"]["actual_yield"],
+            "validation_prediction": lin_res["prediction"]["validation_prediction"]
+        },
+        "consensus_yield": avg_yield,
+        "difference": diff,
+        "relative_diff_pct": (diff / avg_yield * 100) if avg_yield > 0 else 0.0,
+        "state": state,
+        "district": district,
+        "crop": crop,
+        "season": season
     }
-# ============================================================
-# TESTING
-# ============================================================
+
 
 if __name__ == "__main__":
+    test_result = detailed_prediction("Maharashtra", "Kolhapur", "Wheat", "Rabi", model_type="rf")
+    print(f"Prediction: {test_result['prediction']['predicted_yield']:.3f} t/ha")
+    print(f"Metrics (RF): R2={test_result['performance']['r2']:.3f}, RMSE={test_result['performance']['rmse']:.3f}")
 
-    result = detailed_prediction(
-
-        "Maharashtra",
-
-        "Kolhapur",
-
-        "Wheat",
-
-        "Rabi"
-
-    )
-
-    print(result["prediction"])
-
-    print(result["performance"])
-
-    print(result["summary"])
+    comp = compare_models("Maharashtra", "Kolhapur", "Wheat", "Rabi")
+    print(f"Comparison: RF={comp['rf']['predicted_yield']:.3f} vs Ridge={comp['ridge']['predicted_yield']:.3f}")

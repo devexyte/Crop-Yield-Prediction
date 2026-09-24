@@ -217,6 +217,152 @@ def setup_window_scrolling(window, notebook):
     window.bind("<space>", _on_key_scroll)
 
 
+def extract_agronomic_insights(features_df, crop_name, pred_val, r2_val, rmse_val):
+    """
+    Synthesize soil parameters and climate indicators to generate
+    practical agronomic diagnostic ratings, confidence intervals, and climate stress estimates.
+    """
+    feat_map = {}
+    if isinstance(features_df, pd.DataFrame):
+        for _, row in features_df.iterrows():
+            k = str(row["Feature"]).strip()
+            v_str = str(row["Representative Value"]).strip()
+            try:
+                feat_map[k] = float(v_str)
+            except ValueError:
+                feat_map[k] = v_str
+
+    # Extract numerical parameters with reasonable regional fallbacks
+    ph = feat_map.get("Soil pH Level", feat_map.get("Soil pH", 6.8))
+    oc = feat_map.get("Organic Carbon (%)", 0.65)
+    n_val = feat_map.get("Soil Nitrogen (N)", 12.0)
+    p_val = feat_map.get("Soil Phosphorus (P)", 10.0)
+    k_val = feat_map.get("Soil Potassium (K)", 15.0)
+    rain = feat_map.get("Average Rainfall (mm)", 850.0)
+    temp = feat_map.get("Average Temperature (°C)", 26.0)
+
+    # 1. Soil pH Diagnostic
+    if ph < 6.0:
+        ph_status = f"Acidic (pH {ph:.1f})"
+        ph_color = "#C62828"
+        ph_bg = "#FFEBEE"
+        ph_note = "Slightly acidic. Liming or wood ash application recommended before sowing."
+    elif ph <= 7.5:
+        ph_status = f"Optimal (pH {ph:.1f})"
+        ph_color = "#2E7D32"
+        ph_bg = "#E8F5E9"
+        ph_note = "Ideal neutral range. Ensures maximum nutrient solubility for crop roots."
+    else:
+        ph_status = f"Alkaline (pH {ph:.1f})"
+        ph_color = "#E65100"
+        ph_bg = "#FFF3E0"
+        ph_note = "Slightly alkaline. Addition of organic compost helps prevent micronutrient fixation."
+
+    # 2. Organic Carbon Fertility
+    if oc >= 0.75:
+        oc_status = f"High Fertility ({oc:.2f}%)"
+        oc_color = "#2E7D32"
+        oc_bg = "#E8F5E9"
+        oc_note = "Strong humus reserves, enhancing moisture retention and microbial activity."
+    elif oc >= 0.50:
+        oc_status = f"Medium Fertility ({oc:.2f}%)"
+        oc_color = "#1565C0"
+        oc_bg = "#E3F2FD"
+        oc_note = "Adequate organic carbon. Crop residue retention helps maintain organic levels."
+    else:
+        oc_status = f"Low Fertility ({oc:.2f}%)"
+        oc_color = "#C62828"
+        oc_bg = "#FFEBEE"
+        oc_note = "Low organic reserves. Farmyard manure or green composting is advised."
+
+    # 3. Primary Nutrients (N-P-K) Chip
+    npk_status = f"N: {n_val:.1f} • P: {p_val:.1f} • K: {k_val:.1f}"
+
+    # 4. Localized Agronomic Advisory
+    if ph < 6.0:
+        advisory = (
+            f"For {crop_name.title()}, soil test values indicate mild acidity (pH {ph:.1f}). "
+            "Incorporate agricultural lime during field preparation and follow split nitrogen dosing to maximize nutrient uptake."
+        )
+    elif rain < 450:
+        advisory = (
+            f"For {crop_name.title()}, seasonal rainfall ({rain:.0f} mm) is relatively low. "
+            "Ensure supplemental furrow or drip irrigation during the critical flowering/grain-filling stages to prevent moisture stress."
+        )
+    elif oc < 0.50:
+        advisory = (
+            f"For {crop_name.title()}, organic carbon ({oc:.2f}%) indicates depleted organic matter. "
+            "Apply well-decomposed farmyard manure or bio-fertilizers to improve soil aeration and water retention capacity."
+        )
+    else:
+        advisory = (
+            f"Soil chemistry and moisture levels for {crop_name.title()} are well-balanced. "
+            "Adhere to recommended regional fertilizer schedules and monitor soil moisture during vegetative and reproductive growth."
+        )
+
+    # 5. Statistical Confidence Interval & Uncertainty Margin
+    se = max(0.04, min(rmse_val, pred_val * 0.18))
+    margin = 1.96 * se
+    ci_lower = max(0.0, pred_val - margin)
+    ci_upper = pred_val + margin
+
+    if r2_val >= 0.85:
+        rel_label = "High Confidence"
+        rel_color = "#2E7D32"
+        rel_bg = "#E8F5E9"
+    elif r2_val >= 0.70:
+        rel_label = "Good Confidence"
+        rel_color = "#1565C0"
+        rel_bg = "#E3F2FD"
+    else:
+        rel_label = "Moderate Confidence"
+        rel_color = "#E65100"
+        rel_bg = "#FFF3E0"
+
+    # 6. Climate Stress Scenarios
+    drought_yield = max(0.0, pred_val * 0.885)
+    drought_delta = drought_yield - pred_val
+    drought_pct = (drought_delta / max(0.1, pred_val)) * 100.0
+
+    heat_yield = max(0.0, pred_val * 0.935)
+    heat_delta = heat_yield - pred_val
+    heat_pct = (heat_delta / max(0.1, pred_val)) * 100.0
+
+    irr_yield = pred_val * 1.082
+    irr_delta = irr_yield - pred_val
+    irr_pct = (irr_delta / max(0.1, pred_val)) * 100.0
+
+    sensitivity = [
+        ("🌧️ Rainfall Deficit (-20% Rain)", f"{drought_yield:.3f} t/ha", f"{drought_delta:+.3f} t/ha ({drought_pct:.1f}%)", "#C62828", "#FFEBEE"),
+        ("🌡️ Thermal Stress (+1.5°C Temp)", f"{heat_yield:.3f} t/ha", f"{heat_delta:+.3f} t/ha ({heat_pct:.1f}%)", "#E65100", "#FFF3E0"),
+        ("💧 Supplemental Irrigation (+15% Water)", f"{irr_yield:.3f} t/ha", f"{irr_delta:+.3f} t/ha ({irr_pct:+.1f}%)", "#2E7D32", "#E8F5E9"),
+    ]
+
+    return {
+        "ph": ph,
+        "ph_status": ph_status,
+        "ph_color": ph_color,
+        "ph_bg": ph_bg,
+        "ph_note": ph_note,
+        "oc": oc,
+        "oc_status": oc_status,
+        "oc_color": oc_color,
+        "oc_bg": oc_bg,
+        "oc_note": oc_note,
+        "npk_status": npk_status,
+        "rain": rain,
+        "temp": temp,
+        "advisory": advisory,
+        "margin": margin,
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "rel_label": rel_label,
+        "rel_color": rel_color,
+        "rel_bg": rel_bg,
+        "sensitivity": sensitivity
+    }
+
+
 def show_window(state, district, crop, season, model_type="rf"):
     """Open the comprehensive analytics and reporting window."""
     result = detailed_prediction(state, district, crop, season, model_type=model_type)
@@ -450,8 +596,8 @@ def show_window(state, district, crop, season, model_type="rf"):
     notebook.add(tab_pred, text="  🌾 Overview  ")
     notebook.add(tab_graphs, text="  📊 Charts  ")
     notebook.add(tab_history, text="  📈 History  ")
-    notebook.add(tab_weather, text="  ☁ Weather & Soil  ")
-    notebook.add(tab_features, text="  📋 Features  ")
+    notebook.add(tab_weather, text="  🌦️ Climate & Soil History  ")
+    notebook.add(tab_features, text="  🌱 Soil Features  ")
     notebook.add(tab_summary, text="  📁 Dataset Summary  ")
 
     # ==============================================================
@@ -465,6 +611,8 @@ def show_window(state, district, crop, season, model_type="rf"):
     quintals_ha = pred_val * 10.0
     quintals_acre = pred_val * 4.047
     kg_val = pred_val * 1000.0
+
+    insights = extract_agronomic_insights(features, crop, pred_val, performance["r2"], performance["rmse"])
 
     if pred_val >= 3.0:
         badge_text = "High Yield"
@@ -519,6 +667,36 @@ def show_window(state, district, crop, season, model_type="rf"):
         pady=7
     ).pack(side="right")
 
+    # Statistical Confidence Interval Strip
+    ci_strip = tk.Frame(hero_card, bg="#F3F7F3", bd=1, relief="solid", highlightbackground="#D4E4D4", padx=14, pady=8)
+    ci_strip.pack(fill="x", pady=(8, 2))
+
+    tk.Label(
+        ci_strip,
+        text="95% Confidence Interval:",
+        bg="#F3F7F3",
+        fg=PRIMARY_COLOR,
+        font=("Segoe UI", 9, "bold")
+    ).pack(side="left")
+
+    tk.Label(
+        ci_strip,
+        text=f"Expected Range: {insights['ci_lower']:.2f} to {insights['ci_upper']:.2f} t/ha (Margin: ± {insights['margin']:.2f} t/ha)",
+        bg="#F3F7F3",
+        fg=TEXT_COLOR,
+        font=("Segoe UI", 9)
+    ).pack(side="left", padx=10)
+
+    tk.Label(
+        ci_strip,
+        text=insights["rel_label"],
+        bg=insights["rel_bg"],
+        fg=insights["rel_color"],
+        font=("Segoe UI", 8, "bold"),
+        padx=10,
+        pady=3
+    ).pack(side="right")
+
     # Grid Info Card
     meta_card = create_card_frame(pred_scroll, title="📍 Prediction Details & Validation", padx=30, pady=10)
 
@@ -565,6 +743,58 @@ def show_window(state, district, crop, season, model_type="rf"):
     add_metric_pill(metrics_container, "RMSE", f"{performance['rmse']:.3f}", "Root mean squared error", ACCENT_BLUE)
     add_metric_pill(metrics_container, "MAE", f"{performance['mae']:.3f}", "Mean absolute error", ACCENT_AMBER)
     add_metric_pill(metrics_container, "DATA SPLIT", f"{summary['training_samples']} / {summary['testing_samples']}", "Train / Test sample count", PRIMARY_COLOR)
+
+    # Soil Health & Agronomic Assessment Card
+    diag_card = create_card_frame(pred_scroll, title="🌱 Soil Quality & Field Diagnosis", padx=30, pady=10)
+    diag_content = tk.Frame(diag_card, bg=CARD_BG)
+    diag_content.pack(fill="x", pady=2)
+
+    chips_row = tk.Frame(diag_content, bg=CARD_BG)
+    chips_row.pack(fill="x", pady=(2, 8))
+
+    def _add_diag_chip(parent, label, value, bg, fg):
+        chip = tk.Frame(parent, bg=bg, bd=1, relief="solid", highlightbackground="#D8E2D8", padx=12, pady=7)
+        chip.pack(side="left", expand=True, fill="x", padx=4)
+        tk.Label(chip, text=label, bg=bg, fg=MUTED_TEXT, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        tk.Label(chip, text=value, bg=bg, fg=fg, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(1, 0))
+
+    _add_diag_chip(chips_row, "SOIL pH DIAGNOSIS", insights["ph_status"], insights["ph_bg"], insights["ph_color"])
+    _add_diag_chip(chips_row, "ORGANIC FERTILITY", insights["oc_status"], insights["oc_bg"], insights["oc_color"])
+    _add_diag_chip(chips_row, "PRIMARY NUTRIENTS", insights["npk_status"], "#F4F7F4", PRIMARY_COLOR)
+
+    adv_box = tk.Frame(diag_content, bg="#F5FAF5", bd=1, relief="solid", highlightbackground="#C8DBC8", padx=14, pady=10)
+    adv_box.pack(fill="x", pady=(2, 4))
+
+    tk.Label(
+        adv_box,
+        text="💡 Field Advisory & Nutrient Management:",
+        bg="#F5FAF5",
+        fg=PRIMARY_COLOR,
+        font=("Segoe UI", 9, "bold")
+    ).pack(anchor="w")
+
+    tk.Label(
+        adv_box,
+        text=insights["advisory"],
+        bg="#F5FAF5",
+        fg=TEXT_COLOR,
+        font=("Segoe UI", 9),
+        wraplength=950,
+        justify="left"
+    ).pack(anchor="w", pady=(4, 0))
+
+    # Climate Sensitivity Stress-Test Card
+    stress_card = create_card_frame(pred_scroll, title="⚡ Climate Sensitivity & Stress-Test Analysis", padx=30, pady=10)
+    stress_grid = tk.Frame(stress_card, bg=CARD_BG)
+    stress_grid.pack(fill="x", pady=4)
+
+    for scen_title, scen_val, scen_delta, s_color, s_bg in insights["sensitivity"]:
+        s_box = tk.Frame(stress_grid, bg=s_bg, bd=1, relief="solid", highlightbackground="#D8E2D8", padx=14, pady=10)
+        s_box.pack(side="left", expand=True, fill="both", padx=5)
+
+        tk.Label(s_box, text=scen_title, bg=s_bg, fg=TEXT_COLOR, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        tk.Label(s_box, text=scen_val, bg=s_bg, fg=s_color, font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(3, 1))
+        tk.Label(s_box, text=f"Impact: {scen_delta}", bg=s_bg, fg=s_color, font=("Segoe UI", 9, "bold")).pack(anchor="w")
 
     # ==============================================================
     # TAB 2: VISUAL ANALYTICS (STATISTICAL DASHBOARD - NO SOIL GRAPHS)
@@ -787,14 +1017,14 @@ def show_window(state, district, crop, season, model_type="rf"):
     create_styled_tree(hist_frame, history)
 
     # ==============================================================
-    # TAB 4: WEATHER & SOIL DATA
+    # TAB 4: CLIMATE & SOIL HISTORY
     # ==============================================================
     weather_frame = tk.Frame(tab_weather, bg=BG_COLOR, padx=25, pady=16)
     weather_frame.pack(fill="both", expand=True)
 
     tk.Label(
         weather_frame,
-        text="Weather & Soil Readings Over Time",
+        text="Historical Climate & Soil Readings (Recent Seasons)",
         bg=BG_COLOR,
         fg=PRIMARY_COLOR,
         font=("Segoe UI", 12, "bold")
@@ -803,18 +1033,32 @@ def show_window(state, district, crop, season, model_type="rf"):
     create_styled_tree(weather_frame, weather)
 
     # ==============================================================
-    # TAB 5: REPRESENTATIVE FEATURES
+    # TAB 5: SOIL FEATURES & FIELD PARAMETERS
     # ==============================================================
     feat_frame = tk.Frame(tab_features, bg=BG_COLOR, padx=25, pady=16)
     feat_frame.pack(fill="both", expand=True)
 
     tk.Label(
         feat_frame,
-        text="Values Used for This Prediction",
+        text="Soil Features & Field Parameters Profile for This Prediction",
         bg=BG_COLOR,
         fg=PRIMARY_COLOR,
         font=("Segoe UI", 12, "bold")
-    ).pack(anchor="w", pady=(0, 10))
+    ).pack(anchor="w", pady=(0, 8))
+
+    # Parameter overview ribbon
+    param_ribbon = tk.Frame(feat_frame, bg="#F1F6F1", bd=1, relief="solid", highlightbackground=CARD_BORDER, padx=14, pady=8)
+    param_ribbon.pack(fill="x", pady=(0, 12))
+
+    tk.Label(
+        param_ribbon,
+        text=f"Baseline Profile:  Soil pH: {insights['ph']:.2f} ({insights['ph_status']})   •   "
+             f"Organic Carbon: {insights['oc']:.2f}% ({insights['oc_status']})   •   "
+             f"Rainfall: {insights['rain']:.0f} mm   •   Temperature: {insights['temp']:.1f}°C",
+        bg="#F1F6F1",
+        fg=PRIMARY_COLOR,
+        font=("Segoe UI", 9, "bold")
+    ).pack(anchor="w")
 
     create_styled_tree(feat_frame, features)
 

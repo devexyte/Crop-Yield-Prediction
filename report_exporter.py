@@ -40,6 +40,82 @@ except ImportError:
     HAS_DOCX = False
 
 
+def get_agronomic_advisory(features_df, crop_name):
+    """
+    Extract key soil and environmental parameters to provide field diagnosis and advisory.
+    """
+    feat_map = {}
+    if isinstance(features_df, pd.DataFrame):
+        if "Feature" in features_df.columns and "Representative Value" in features_df.columns:
+            for _, r in features_df.iterrows():
+                try:
+                    feat_map[str(r["Feature"]).strip()] = float(str(r["Representative Value"]).strip())
+                except ValueError:
+                    feat_map[str(r["Feature"]).strip()] = str(r["Representative Value"]).strip()
+        else:
+            for col in features_df.columns:
+                val = features_df[col].iloc[0]
+                try:
+                    feat_map[str(col).strip()] = float(val)
+                except (ValueError, TypeError):
+                    feat_map[str(col).strip()] = str(val)
+
+    ph = feat_map.get("Soil pH Level", feat_map.get("Soil pH", 6.8))
+    oc = feat_map.get("Organic Carbon (%)", 0.65)
+    n_val = feat_map.get("Soil Nitrogen (N)", 12.0)
+    p_val = feat_map.get("Soil Phosphorus (P)", 10.0)
+    k_val = feat_map.get("Soil Potassium (K)", 15.0)
+    rain = feat_map.get("Average Rainfall (mm)", 850.0)
+
+    if ph < 6.0:
+        ph_status = f"Acidic (pH {ph:.1f})"
+        ph_note = "Lime or wood ash application recommended before sowing."
+    elif ph <= 7.5:
+        ph_status = f"Optimal (pH {ph:.1f})"
+        ph_note = "Ideal neutral range for maximum nutrient bioavailability."
+    else:
+        ph_status = f"Alkaline (pH {ph:.1f})"
+        ph_note = "Application of organic compost recommended to prevent micronutrient fixation."
+
+    if oc >= 0.75:
+        oc_status = f"High Fertility ({oc:.2f}%)"
+    elif oc >= 0.50:
+        oc_status = f"Medium Fertility ({oc:.2f}%)"
+    else:
+        oc_status = f"Low Fertility ({oc:.2f}%) - Compost needed"
+
+    npk_status = f"N: {n_val:.1f} • P: {p_val:.1f} • K: {k_val:.1f}"
+
+    if ph < 6.0:
+        advisory = (
+            f"For {crop_name.title()}, soil test values indicate mild acidity (pH {ph:.1f}). "
+            "Incorporate agricultural lime during field preparation and follow split nitrogen dosing."
+        )
+    elif rain < 450:
+        advisory = (
+            f"For {crop_name.title()}, seasonal rainfall ({rain:.0f} mm) is relatively low. "
+            "Ensure supplemental irrigation during the critical flowering and grain-filling stages."
+        )
+    elif oc < 0.50:
+        advisory = (
+            f"For {crop_name.title()}, organic carbon ({oc:.2f}%) indicates depleted organic matter. "
+            "Apply well-decomposed farmyard manure or bio-fertilizers to improve water retention."
+        )
+    else:
+        advisory = (
+            f"Soil chemistry and moisture levels for {crop_name.title()} are well-balanced. "
+            "Adhere to recommended regional fertilizer schedules and monitor moisture during reproductive growth."
+        )
+
+    return {
+        "ph_status": ph_status,
+        "ph_note": ph_note,
+        "oc_status": oc_status,
+        "npk_status": npk_status,
+        "advisory": advisory
+    }
+
+
 def generate_charts_image_bytes(history, crop_yield_series, prediction, summary, crop, district):
     """
     Generate a high-resolution, publication-grade 4-panel statistical figure
@@ -326,7 +402,29 @@ def export_pdf_report(filepath, crop, district, state, season, model_name, predi
         ("RIGHTPADDING", (0, 0), (-1, -1), 8),
     ]))
     story.append(t_pred)
-    story.append(Spacer(1, 14))
+    story.append(Spacer(1, 10))
+
+    # Agronomic Field Diagnosis & Advisory
+    diag = get_agronomic_advisory(features, crop)
+    story.append(Paragraph("Agronomic Field Diagnosis & Advisory", section_style))
+    diag_data = [
+        [Paragraph("<b>Soil pH Diagnosis</b>", cell_bold), Paragraph(f"{diag['ph_status']} – {diag['ph_note']}", cell_norm)],
+        [Paragraph("<b>Organic Carbon Status</b>", cell_bold), Paragraph(diag['oc_status'], cell_norm)],
+        [Paragraph("<b>Primary Nutrients (N-P-K)</b>", cell_bold), Paragraph(diag['npk_status'], cell_norm)],
+        [Paragraph("<b>Recommended Field Practice</b>", cell_bold), Paragraph(diag['advisory'], cell_norm)],
+    ]
+    t_diag = Table(diag_data, colWidths=[2.0 * inch, 5.2 * inch])
+    t_diag.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7FAF7")),
+        ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#D8E2D8")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2ECE2")),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(t_diag)
+    story.append(Spacer(1, 12))
 
     # Embedded Statistical Charts
     story.append(Paragraph("Statistical Visual Analytics", section_style))
@@ -365,16 +463,48 @@ def export_pdf_report(filepath, crop, district, state, season, model_name, predi
     story.append(t_hist)
     story.append(Spacer(1, 14))
 
-    # Environmental Baseline Values
-    story.append(Paragraph("Baseline Soil & Climatic Parameters Used for Prediction", section_style))
+    # Historical Climate & Soil Readings (if available)
+    if weather is not None and isinstance(weather, pd.DataFrame) and not weather.empty:
+        story.append(Paragraph("Historical Climate & Soil Readings (Recent Seasons)", section_style))
+        w_headers = [Paragraph(f"<b>{col}</b>", ParagraphStyle("THW", parent=cell_bold, fontSize=7.5, textColor=colors.white)) for col in weather.columns]
+        w_rows = [w_headers]
+        for _, row in weather.head(8).iterrows():
+            w_cells = []
+            for val in row:
+                if isinstance(val, float):
+                    w_cells.append(Paragraph(f"{val:.2f}" if abs(val) < 100 else f"{val:.0f}", ParagraphStyle("CW", parent=cell_norm, fontSize=7.5)))
+                else:
+                    w_cells.append(Paragraph(str(val), ParagraphStyle("CW", parent=cell_norm, fontSize=7.5)))
+            w_rows.append(w_cells)
+        col_w_w = (7.2 * inch) / len(weather.columns)
+        t_weather = Table(w_rows, colWidths=[col_w_w] * len(weather.columns))
+        t_weather.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B4D2E")),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#FFFFFF"), colors.HexColor("#F9FAF9")]),
+            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#D8E2D8")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5EBE5")),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(t_weather)
+        story.append(Spacer(1, 14))
+
+    # Soil Features & Field Parameters Profile
+    story.append(Paragraph("Soil Features & Field Parameters Profile", section_style))
     feat_headers = [Paragraph("<b>Parameter</b>", ParagraphStyle("TH", parent=cell_bold, textColor=colors.white)),
                     Paragraph("<b>Value Used</b>", ParagraphStyle("TH", parent=cell_bold, textColor=colors.white))]
     feat_rows = [feat_headers]
 
-    for col in features.columns:
-        val = features[col].iloc[0]
-        val_str = f"{val:.3f}" if isinstance(val, float) else str(val)
-        feat_rows.append([Paragraph(str(col), cell_norm), Paragraph(val_str, cell_bold)])
+    if "Feature" in features.columns and "Representative Value" in features.columns:
+        for _, row in features.iterrows():
+            feat_rows.append([Paragraph(str(row["Feature"]), cell_norm), Paragraph(str(row["Representative Value"]), cell_bold)])
+    else:
+        for col in features.columns:
+            val = features[col].iloc[0]
+            val_str = f"{val:.3f}" if isinstance(val, float) else str(val)
+            feat_rows.append([Paragraph(str(col), cell_norm), Paragraph(val_str, cell_bold)])
 
     t_feat = Table(feat_rows, colWidths=[3.8 * inch, 3.4 * inch])
     t_feat.setStyle(TableStyle([
@@ -483,6 +613,39 @@ def export_docx_report(filepath, crop, district, state, season, model_name, pred
 
     doc.add_paragraph()
 
+    # Agronomic Field Diagnosis & Advisory
+    diag = get_agronomic_advisory(features, crop)
+    doc.add_heading("Agronomic Field Diagnosis & Advisory", level=1)
+    diag_rows = [
+        ("Soil pH Diagnosis", f"{diag['ph_status']} – {diag['ph_note']}"),
+        ("Organic Carbon Status", diag['oc_status']),
+        ("Primary Nutrients (N-P-K)", diag['npk_status']),
+        ("Recommended Field Practice", diag['advisory'])
+    ]
+    t_diag = doc.add_table(rows=len(diag_rows) + 1, cols=2)
+    t_diag.alignment = WD_TABLE_ALIGNMENT.CENTER
+    t_diag.style = "Table Grid"
+    t_diag.rows[0].cells[0].text = "Field Indicator"
+    t_diag.rows[0].cells[1].text = "Diagnosis / Recommendation"
+    for cell in t_diag.rows[0].cells:
+        for p in cell.paragraphs:
+            for r in p.runs:
+                r.font.bold = True
+                r.font.name = "Segoe UI"
+                r.font.color.rgb = RGBColor(0x1B, 0x4D, 0x2E)
+
+    for idx, (label, val) in enumerate(diag_rows):
+        cells = t_diag.rows[idx + 1].cells
+        cells[0].text = label
+        cells[1].text = val
+        for cell in cells:
+            for p in cell.paragraphs:
+                for r in p.runs:
+                    r.font.name = "Segoe UI"
+                    r.font.size = Pt(9.5)
+
+    doc.add_paragraph()
+
     # 2. Visual Charts Section
     doc.add_heading("Visual Analytics & Statistical Charts", level=1)
     chart_buf = generate_charts_image_bytes(history, crop_yield_series, prediction, summary, crop, district)
@@ -515,32 +678,82 @@ def export_docx_report(filepath, crop, district, state, season, model_name, pred
 
     doc.add_paragraph()
 
-    # 4. Baseline Parameters
-    doc.add_heading("Baseline Input Parameters Used for Prediction", level=1)
-    feat_cols = list(features.columns)
-    t_feat = doc.add_table(rows=len(feat_cols) + 1, cols=2)
-    t_feat.alignment = WD_TABLE_ALIGNMENT.CENTER
-    t_feat.style = "Table Grid"
+    # 4. Climate & Soil Readings (if available)
+    if weather is not None and isinstance(weather, pd.DataFrame) and not weather.empty:
+        doc.add_paragraph()
+        doc.add_heading("Historical Climate & Soil Readings (Recent Seasons)", level=1)
+        w_cols = list(weather.columns)
+        t_w = doc.add_table(rows=min(9, len(weather) + 1), cols=len(w_cols))
+        t_w.alignment = WD_TABLE_ALIGNMENT.CENTER
+        t_w.style = "Table Grid"
 
-    t_feat.rows[0].cells[0].text = "Parameter"
-    t_feat.rows[0].cells[1].text = "Value"
-    for cell in t_feat.rows[0].cells:
-        for p in cell.paragraphs:
-            for r in p.runs:
-                r.font.bold = True
-                r.font.name = "Segoe UI"
+        for i, col in enumerate(w_cols):
+            t_w.rows[0].cells[i].text = str(col)
+            for p in t_w.rows[0].cells[i].paragraphs:
+                for r in p.runs:
+                    r.font.bold = True
+                    r.font.name = "Segoe UI"
+                    r.font.size = Pt(8.5)
 
-    for idx, col in enumerate(feat_cols):
-        val = features[col].iloc[0]
-        val_str = f"{val:.3f}" if isinstance(val, float) else str(val)
-        cells = t_feat.rows[idx + 1].cells
-        cells[0].text = str(col)
-        cells[1].text = val_str
-        for cell in cells:
+        for row_idx, (_, row) in enumerate(weather.head(8).iterrows()):
+            cells = t_w.rows[row_idx + 1].cells
+            for col_idx, val in enumerate(row):
+                formatted_val = f"{val:.2f}" if isinstance(val, float) else str(val)
+                cells[col_idx].text = formatted_val
+                for p in cells[col_idx].paragraphs:
+                    for r in p.runs:
+                        r.font.name = "Segoe UI"
+                        r.font.size = Pt(8.5)
+
+    doc.add_paragraph()
+
+    # 5. Soil Features & Field Parameters Profile
+    doc.add_heading("Soil Features & Field Parameters Profile", level=1)
+    if "Feature" in features.columns and "Representative Value" in features.columns:
+        t_feat = doc.add_table(rows=len(features) + 1, cols=2)
+        t_feat.alignment = WD_TABLE_ALIGNMENT.CENTER
+        t_feat.style = "Table Grid"
+        t_feat.rows[0].cells[0].text = "Parameter"
+        t_feat.rows[0].cells[1].text = "Value"
+        for cell in t_feat.rows[0].cells:
             for p in cell.paragraphs:
                 for r in p.runs:
+                    r.font.bold = True
                     r.font.name = "Segoe UI"
-                    r.font.size = Pt(9)
+
+        for idx, (_, row) in enumerate(features.iterrows()):
+            cells = t_feat.rows[idx + 1].cells
+            cells[0].text = str(row["Feature"])
+            cells[1].text = str(row["Representative Value"])
+            for cell in cells:
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        r.font.name = "Segoe UI"
+                        r.font.size = Pt(9)
+    else:
+        feat_cols = list(features.columns)
+        t_feat = doc.add_table(rows=len(feat_cols) + 1, cols=2)
+        t_feat.alignment = WD_TABLE_ALIGNMENT.CENTER
+        t_feat.style = "Table Grid"
+        t_feat.rows[0].cells[0].text = "Parameter"
+        t_feat.rows[0].cells[1].text = "Value"
+        for cell in t_feat.rows[0].cells:
+            for p in cell.paragraphs:
+                for r in p.runs:
+                    r.font.bold = True
+                    r.font.name = "Segoe UI"
+
+        for idx, col in enumerate(feat_cols):
+            val = features[col].iloc[0]
+            val_str = f"{val:.3f}" if isinstance(val, float) else str(val)
+            cells = t_feat.rows[idx + 1].cells
+            cells[0].text = str(col)
+            cells[1].text = val_str
+            for cell in cells:
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        r.font.name = "Segoe UI"
+                        r.font.size = Pt(9)
 
     doc.save(filepath)
     return filepath
@@ -550,6 +763,7 @@ def export_txt_report(filepath, crop, district, state, season, model_name, predi
     """
     Generate clean plaintext summary report as fallback.
     """
+    diag = get_agronomic_advisory(features, crop)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write("=" * 65 + "\n")
         f.write("CROP YIELD PREDICTION REPORT\n")
@@ -562,6 +776,13 @@ def export_txt_report(filepath, crop, district, state, season, model_name, predi
         f.write(f"Latest Recorded:    {prediction['actual_yield']:.3f} Tonnes / Hectare ({prediction['latest_year']})\n")
         f.write(f"Prediction Error:   {prediction['prediction_error']:.3f} Tonnes / Hectare\n\n")
         f.write("-" * 65 + "\n")
+        f.write("AGRONOMIC FIELD DIAGNOSIS & ADVISORY\n")
+        f.write("-" * 65 + "\n")
+        f.write(f"Soil pH Status:     {diag['ph_status']} ({diag['ph_note']})\n")
+        f.write(f"Organic Carbon:     {diag['oc_status']}\n")
+        f.write(f"Nutrient Balance:   {diag['npk_status']}\n")
+        f.write(f"Field Advisory:     {diag['advisory']}\n\n")
+        f.write("-" * 65 + "\n")
         f.write("MODEL PERFORMANCE\n")
         f.write("-" * 65 + "\n")
         f.write(f"R² Score:           {performance['r2']:.4f}\n")
@@ -573,5 +794,14 @@ def export_txt_report(filepath, crop, district, state, season, model_name, predi
         f.write("HISTORICAL HARVEST RECORDS\n")
         f.write("-" * 65 + "\n")
         f.write(history.to_string(index=False))
+        if weather is not None and isinstance(weather, pd.DataFrame) and not weather.empty:
+            f.write("\n\n" + "-" * 65 + "\n")
+            f.write("HISTORICAL CLIMATE & SOIL READINGS\n")
+            f.write("-" * 65 + "\n")
+            f.write(weather.to_string(index=False))
+        f.write("\n\n" + "-" * 65 + "\n")
+        f.write("SOIL FEATURES & FIELD PARAMETERS PROFILE\n")
+        f.write("-" * 65 + "\n")
+        f.write(features.to_string(index=False))
         f.write("\n\n" + "=" * 65 + "\n")
     return filepath
